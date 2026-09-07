@@ -490,23 +490,7 @@ onUnmounted(()=>{
         <div class="toolbar-top">
           <div class="toolbar-heading"><h1 :title="title">{{title}}</h1></div>
           <div class="toolbar-actions">
-            <template v-if="selectedItems.length > 1">
-              <span class="batch-count">已选 {{selectedItems.length}} 项</span>
-              <button v-if="!['trash','myshares'].includes(mode)" class="soft" @click="downloadSelected">↓ 批量下载 ({{selectedItems.length}})</button>
-              <button v-if="['drive','starred','recent','search'].includes(mode)" class="soft" @click="toggleStarred">{{selectedItems.some(item=>!itemIsStarred(item))?'★ 批量收藏':'批量取消收藏'}} ({{selectedItems.length}})</button>
-              <button v-if="['drive','starred','recent','search'].includes(mode)" class="soft" @click="createShareSelected">🔗 批量分享 ({{selectedItems.length}})</button>
-              <button v-if="mode==='drive'" class="soft" @click="stageTransfer('copy')">📋 批量复制</button>
-              <button v-if="mode==='drive'" class="soft" @click="stageTransfer('move')">✂ 批量剪切</button>
-              <button v-if="mode==='drive'" class="warn" @click="trashSelected">🗑 移入回收站 ({{selectedItems.length}})</button>
-              <button v-if="mode==='trash'" class="soft" @click="restoreSelected">↶ 批量恢复 ({{selectedItems.length}})</button>
-              <button v-if="mode==='trash'" class="warn" @click="deleteForever">🗑 永久删除 ({{selectedItems.length}})</button>
-              <button v-if="mode==='share'&&share" class="accent" @click="saveShareSelected">💾 保存到网盘 ({{selectedItems.length}})</button>
-              <button v-if="mode==='myshares'" class="warn" @click="cancelMyShares">批量取消分享 ({{selectedItems.length}})</button>
-              <button class="soft" title="取消选择" @click="clearSelection">✕ 取消选择</button>
-            </template>
-            <template v-else>
               <input v-if="['drive','starred','recent','myshares','trash'].includes(mode)||(mode==='share'&&share)" v-model="query" class="search" placeholder="搜索当前目录">
-              <button v-if="selectedItems.length===1&&!['trash','myshares'].includes(mode)" class="soft" @click="downloadSelected">↓ 下载</button>
               <button v-if="mode==='drive'&&clipboard" class="paste" @click="pasteTransfer">粘贴 {{clipboard.items.length}} 项</button>
               <button v-if="mode==='drive'&&account.connected" class="primary" @click="chooseUpload">↑ 上传文件</button>
               <button v-if="mode==='drive'&&account.connected" class="soft" @click="chooseUploadFolder">↑ 上传文件夹</button>
@@ -520,7 +504,6 @@ onUnmounted(()=>{
               <button v-if="mode==='uploads'&&uploads.some(task=>['completed','failed','cancelled'].includes(task.state))" class="soft" @click="clearFinishedUploads">清理记录</button>
               <button v-if="mode==='downloads'&&downloads.length" class="soft" @click="clearDownloadHistory">清理记录</button>
               <button class="primary" @click="mode='share';share=null;files=[];clearSelection()">＋ 打开分享</button>
-            </template>
           </div>
         </div>
         <div class="toolbar-sub">
@@ -607,6 +590,17 @@ onUnmounted(()=>{
         <div :class="['file-panel',{'drop-active':dragUpload}]" @scroll.passive="onListScroll" @dragenter.prevent="mode==='drive'&&account.connected&&(dragUpload=true)" @dragover.prevent @dragleave="leaveDrop" @drop.prevent="dropFiles">
           <div v-if="mode==='search'&&searchStats" class="search-summary"><form @submit.prevent="searchAll"><input v-model="globalQuery" placeholder="输入新的搜索关键词"><button class="primary" :disabled="loading">{{loading?'搜索中…':'重新搜索'}}</button><button v-if="loading" type="button" class="soft" @click="cancelSearch">取消搜索</button></form><small>已扫描 {{searchLive.folders||searchStats.folders}} 个目录、{{searchLive.scanned||searchStats.scanned}} 项，找到 {{files.length}} 项<span v-if="searchStats.truncated">（结果已达到安全上限）</span></small></div>
           <div class="list-head"><button @click="setSort('name')">名称 {{sortBy==='name'?(sortDirection>0?'↑':'↓'):''}}</button><button @click="setSort('size')">大小 {{sortBy==='size'?(sortDirection>0?'↑':'↓'):''}}</button><button @click="setSort('time')">修改时间 {{sortBy==='time'?(sortDirection>0?'↑':'↓'):''}}</button><span>操作</span></div>
+          <div v-if="selectedItems.length>1" class="list-batch-actions">
+            <b>已选 {{selectedItems.length}} 项</b>
+            <button v-if="!['trash','myshares'].includes(mode)" @click="downloadSelected">批量下载</button>
+            <button v-if="['drive','starred','recent','search'].includes(mode)" @click="toggleStarred">{{selectedItems.some(item=>!itemIsStarred(item))?'批量收藏':'取消收藏'}}</button>
+            <button v-if="['drive','starred','recent','search'].includes(mode)" @click="createShareSelected">批量分享</button>
+            <template v-if="mode==='drive'"><button @click="stageTransfer('copy')">复制</button><button @click="stageTransfer('move')">剪切</button><button class="warn" @click="trashSelected">移入回收站</button></template>
+            <template v-if="mode==='trash'"><button @click="restoreSelected">批量恢复</button><button class="warn" @click="deleteForever">永久删除</button></template>
+            <button v-if="mode==='share'&&share" class="accent" @click="saveShareSelected">保存到网盘</button>
+            <button v-if="mode==='myshares'" class="warn" @click="cancelMyShares">取消分享</button>
+            <button title="取消选择" @click="clearSelection">取消选择</button>
+          </div>
           <div v-if="loading" class="state">正在加载…</div><div v-else-if="error" class="state error">{{error}}</div><div v-else-if="!files.length" class="state">这个目录是空的</div>
           <div v-for="item in displayFiles" :key="item.id" :class="['file-row',{selected:selectedIds.includes(item.id)}]" role="button" tabindex="0" :title="item.kind==='drive#folder'?'双击进入文件夹':canPreview(item)?'双击打开':'此类型需明确点击下载按钮后在本机打开'" @click="selectItem(item,$event)" @dblclick="openItem(item)" @keydown.enter="openItem(item)">
             <span class="file-name"><i class="row-check">{{selectedIds.includes(item.id)?'✓':''}}</i><span class="file-visual"><img v-if="item.thumbnail_link&&!thumbFailed[item.id]&&item.kind!=='drive#folder'" :src="item.thumbnail_link" alt="" loading="lazy" @error="markThumbFailed(item)"><i v-else>{{icon(item)}}</i></span><span><b>{{item.name}}</b><small>{{item._search_path||item.mime_type||item.kind}}</small></span></span><span>{{size(item.size)}}</span><span>{{item.modified_time?new Date(item.modified_time).toLocaleString():'—'}}</span>
