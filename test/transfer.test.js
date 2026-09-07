@@ -2,9 +2,49 @@ import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { sanitizeSubDir } = require('../electron/core.cjs');
+const { sanitizeSubDir, buildInterruptedDownloadOptions } = require('../electron/core.cjs');
 
 describe('transfer and search control', () => {
+  it('builds valid interrupted download options for HTTP Range resumption', () => {
+    const task = {
+      id: 'd-1',
+      name: 'big-video.mp4',
+      path: 'C:\\Users\\xu\\Downloads\\big-video.mp4',
+      url: 'https://cdn.mypikpak.com/big-video.mp4',
+      urlChain: ['https://cdn.mypikpak.com/big-video.mp4'],
+      total: 104857600, // 100MB
+      eTag: '"etag-12345"',
+      lastModified: 'Wed, 21 Oct 2026 07:28:00 GMT',
+      startTime: 1787884938
+    };
+
+    const opts = buildInterruptedDownloadOptions({ task, localSize: 52428800 }); // 50MB downloaded
+    expect(opts).not.toBeNull();
+    expect(opts.path).toBe(task.path);
+    expect(opts.offset).toBe(52428800);
+    expect(opts.length).toBe(104857600);
+    expect(opts.eTag).toBe('"etag-12345"');
+    expect(opts.urlChain).toEqual(['https://cdn.mypikpak.com/big-video.mp4']);
+  });
+
+  it('rejects resumption when local partial file is empty or already full', () => {
+    const task = {
+      path: 'C:\\Users\\xu\\Downloads\\video.mp4',
+      url: 'https://cdn.mypikpak.com/video.mp4',
+      total: 1000
+    };
+
+    expect(buildInterruptedDownloadOptions({ task, localSize: 0 })).toBeNull();
+    expect(buildInterruptedDownloadOptions({ task, localSize: -10 })).toBeNull();
+    expect(buildInterruptedDownloadOptions({ task, localSize: 1000 })).toBeNull();
+    expect(buildInterruptedDownloadOptions({ task, localSize: 1500 })).toBeNull();
+  });
+
+  it('rejects resumption when path or url is missing', () => {
+    expect(buildInterruptedDownloadOptions({ task: { total: 1000 }, localSize: 500 })).toBeNull();
+    expect(buildInterruptedDownloadOptions({ task: { path: 'C:\\file.bin', total: 1000 }, localSize: 500 })).toBeNull();
+    expect(buildInterruptedDownloadOptions(null)).toBeNull();
+  });
   it('sanitizes relative subDir paths and blocks directory traversal', () => {
     expect(sanitizeSubDir('')).toBe('');
     expect(sanitizeSubDir('Season 1/Episode 1')).toBe('Season 1/Episode 1');

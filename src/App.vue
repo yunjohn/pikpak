@@ -30,12 +30,23 @@ const treeChildren=ref({}), treeExpanded=ref([]);
 const NAV_STATE_KEY='pikpak-desktop-navigation-v1';
 const folders=computed(()=>files.value.filter(item=>item.kind==='drive#folder'));
 const selectedItems=computed(()=>files.value.filter(item=>selectedIds.value.includes(item.id)));
+const renderedLimit=ref(60);
 const visibleFiles=computed(()=>{
   const needle=query.value.trim().toLocaleLowerCase();
   const list=needle?files.value.filter(item=>(item.name||'').toLocaleLowerCase().includes(needle)):files.value.slice();
   const value=item=>sortBy.value==='size'?Number(item.size||0):sortBy.value==='time'?Date.parse(item.modified_time||0)||0:(item.name||'').toLocaleLowerCase();
   return list.sort((a,b)=>{if(a.kind!==b.kind)return a.kind==='drive#folder'?-1:1;const av=value(a),bv=value(b);return (typeof av==='string'?av.localeCompare(bv,'zh-CN'):(av-bv))*sortDirection.value});
 });
+const displayFiles=computed(()=>visibleFiles.value.slice(0,renderedLimit.value));
+watch([mode,pathStack,query,sortBy,sortDirection],()=>{renderedLimit.value=60});
+function onListScroll(e){
+  const el=e.target;
+  if(el.scrollHeight-el.scrollTop-el.clientHeight<260){
+    if(renderedLimit.value<visibleFiles.value.length){
+      renderedLimit.value=Math.min(visibleFiles.value.length,renderedLimit.value+60);
+    }
+  }
+}
 const title=computed(()=>mode.value==='drive'?'我的 PikPak':mode.value==='search'?'全盘搜索':mode.value==='starred'?'收藏':mode.value==='recent'?'最近':mode.value==='myshares'?'我的分享':mode.value==='uploads'?'上传任务':mode.value==='downloads'?'本机下载':mode.value==='offline'?'离线下载':mode.value==='trash'?'回收站':mode.value==='settings'?'设置':(share.value?'分享文件':'打开分享'));
 
 function size(value){let n=Number(value);if(!n)return '—';const u=['B','KB','MB','GB','TB'];let i=0;while(n>=1024&&i<4){n/=1024;i++}return `${n.toFixed(i?1:0)} ${u[i]}`}
@@ -52,7 +63,7 @@ function isImage(item){return (item?.mime_type||'').startsWith('image/')||/\.(jp
 function isArchive(item){const mime=(item?.mime_type||'').toLowerCase();return mime.includes('zip')||mime.includes('rar')||mime.includes('7z')||mime.includes('compressed')||mime.includes('archive')||/\.(zip|rar|7z|tar|gz|bz2|xz)$/i.test(item?.name||'')}
 function canPreview(item){return isArchive(item)||isVideo(item)||isAudio(item)||isImage(item)||(item?.mime_type||'')==='application/pdf'||/\.(pdf|txt|log|md|json|xml|srt|ass|vtt)$/i.test(item?.name||'')||(item?.mime_type||'').startsWith('text/')}
 function previewUrl(item){return (isVideo(item)?playbackSources(item)[0]?.url:'')||contentUrl(item)||(isImage(item)?item?.thumbnail_link||'':'')}
-function markThumbFailed(item){thumbFailed.value={...thumbFailed.value,[item.id]:true}}
+function markThumbFailed(item){if(Object.keys(thumbFailed.value).length>300)thumbFailed.value={};thumbFailed.value={...thumbFailed.value,[item.id]:true}}
 async function run(work){loading.value=true;error.value='';try{await work()}catch(e){error.value=e.message||String(e)}finally{loading.value=false}}
 function clearSelection(){selected.value=null;selectedIds.value=[]}
 async function loadDrive(parentId='', name='全部文件',stackMode=parentId?'push':'reset'){await run(async()=>{mode.value='drive';share.value=null;files.value=(await api.listDrive(parentId)).files;treeChildren.value={...treeChildren.value,[parentId]:files.value.filter(item=>item.kind==='drive#folder')};if(parentId&&!treeExpanded.value.includes(parentId))treeExpanded.value=[...treeExpanded.value,parentId];clearSelection();if(stackMode==='reset')pathStack.value=[{id:'',name}];else if(stackMode==='push')pathStack.value.push({id:parentId,name})})}
@@ -417,6 +428,9 @@ function handleGlobalKeyDown(e){
       if(currentIndex===-1)nextIndex=0;
       else if(key==='ArrowDown')nextIndex=Math.min(list.length-1,currentIndex+1);
       else nextIndex=Math.max(0,currentIndex-1);
+      if(nextIndex>=renderedLimit.value-5){
+        renderedLimit.value=Math.min(list.length,renderedLimit.value+60);
+      }
       selected.value=list[nextIndex];
       selectedIds.value=[list[nextIndex].id];
       nextTick(()=>{
@@ -585,13 +599,17 @@ onUnmounted(()=>{
         <details><summary>高级：使用 Access Token</summary><form @submit.prevent="saveToken"><input v-model="token" type="password" placeholder="Access Token"><button class="soft">连接</button></form></details>
       </section>
       <section v-else class="content">
-        <div :class="['file-panel',{'drop-active':dragUpload}]" @dragenter.prevent="mode==='drive'&&account.connected&&(dragUpload=true)" @dragover.prevent @dragleave="leaveDrop" @drop.prevent="dropFiles">
+        <div :class="['file-panel',{'drop-active':dragUpload}]" @scroll.passive="onListScroll" @dragenter.prevent="mode==='drive'&&account.connected&&(dragUpload=true)" @dragover.prevent @dragleave="leaveDrop" @drop.prevent="dropFiles">
           <div v-if="mode==='search'&&searchStats" class="search-summary"><form @submit.prevent="searchAll"><input v-model="globalQuery" placeholder="输入新的搜索关键词"><button class="primary" :disabled="loading">{{loading?'搜索中…':'重新搜索'}}</button><button v-if="loading" type="button" class="soft" @click="cancelSearch">取消搜索</button></form><small>已扫描 {{searchLive.folders||searchStats.folders}} 个目录、{{searchLive.scanned||searchStats.scanned}} 项，找到 {{files.length}} 项<span v-if="searchStats.truncated">（结果已达到安全上限）</span></small></div>
           <div class="list-head"><button @click="setSort('name')">名称 {{sortBy==='name'?(sortDirection>0?'↑':'↓'):''}}</button><button @click="setSort('size')">大小 {{sortBy==='size'?(sortDirection>0?'↑':'↓'):''}}</button><button @click="setSort('time')">修改时间 {{sortBy==='time'?(sortDirection>0?'↑':'↓'):''}}</button><span>操作</span></div>
           <div v-if="loading" class="state">正在加载…</div><div v-else-if="error" class="state error">{{error}}</div><div v-else-if="!files.length" class="state">这个目录是空的</div>
-          <div v-for="item in visibleFiles" :key="item.id" :class="['file-row',{selected:selectedIds.includes(item.id)}]" role="button" tabindex="0" :title="item.kind==='drive#folder'?'双击进入文件夹':canPreview(item)?'双击打开':'此类型需明确点击下载按钮后在本机打开'" @click="selectItem(item,$event)" @dblclick="openItem(item)" @keydown.enter="openItem(item)">
+          <div v-for="item in displayFiles" :key="item.id" :class="['file-row',{selected:selectedIds.includes(item.id)}]" role="button" tabindex="0" :title="item.kind==='drive#folder'?'双击进入文件夹':canPreview(item)?'双击打开':'此类型需明确点击下载按钮后在本机打开'" @click="selectItem(item,$event)" @dblclick="openItem(item)" @keydown.enter="openItem(item)">
             <span class="file-name"><i class="row-check">{{selectedIds.includes(item.id)?'✓':''}}</i><span class="file-visual"><img v-if="item.thumbnail_link&&!thumbFailed[item.id]&&item.kind!=='drive#folder'" :src="item.thumbnail_link" alt="" loading="lazy" @error="markThumbFailed(item)"><i v-else>{{icon(item)}}</i></span><span><b>{{item.name}}</b><small>{{item._search_path||item.mime_type||item.kind}}</small></span></span><span>{{size(item.size)}}</span><span>{{item.modified_time?new Date(item.modified_time).toLocaleString():'—'}}</span>
             <span class="row-actions"><button v-if="item.kind!=='drive#folder'&&canPreview(item)" @click.stop="itemAction(item,'open')">打开</button><button v-if="!['trash','myshares'].includes(mode)" @click.stop="itemAction(item,'download')">下载</button><button v-if="mode==='share'" class="accent" @click.stop="itemAction(item,'save')">保存</button><button v-if="['drive','starred','recent','search'].includes(mode)" @click.stop="itemAction(item,'share')">分享</button><button v-if="['drive','starred','recent','search'].includes(mode)" @click.stop="itemAction(item,'star')">{{itemIsStarred(item)?'取消收藏':'收藏'}}</button><template v-if="mode==='drive'"><button @click.stop="itemAction(item,'copy')">复制</button><button @click.stop="itemAction(item,'move')">剪切</button><button @click.stop="itemAction(item,'rename')">重命名</button><button class="warn" @click.stop="itemAction(item,'trash')">回收站</button></template><template v-if="mode==='trash'"><button @click.stop="itemAction(item,'restore')">恢复</button><button class="warn" @click.stop="itemAction(item,'delete')">删除</button></template><template v-if="mode==='myshares'"><button @click.stop="itemAction(item,'copyShare')">复制链接</button><button class="warn" @click.stop="itemAction(item,'cancelShare')">取消分享</button></template></span>
+          </div>
+          <div v-if="visibleFiles.length>displayFiles.length" class="list-load-more">
+            <span>已加载 {{displayFiles.length}} / {{visibleFiles.length}} 项</span>
+            <button class="soft" @click="renderedLimit=visibleFiles.length">加载全部 ({{visibleFiles.length}})</button>
           </div>
         </div>
       </section>

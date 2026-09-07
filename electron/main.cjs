@@ -2,7 +2,7 @@ const { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, session, sh
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
-const { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, archiveItemsFrom, archiveAccessToken, sanitizeSubDir } = require('./core.cjs');
+const { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, buildInterruptedDownloadOptions } = require('./core.cjs');
 const { logger } = require('./logger.cjs');
 
 process.on('uncaughtException', err => logger.error('process', 'Uncaught exception', err?.stack || err));
@@ -193,9 +193,24 @@ function installDownloadManager() {
     const pending=pendingDownloads.shift();
     if(pending?.timer)clearTimeout(pending.timer);
     const request=pending?.task || {id:crypto.randomUUID(),name:item.getFilename(),subDir:''};
-    const savePath=uniqueDownloadPath(request.name || item.getFilename(), request.subDir || '');
+    const savePath=request.path || uniqueDownloadPath(request.name || item.getFilename(), request.subDir || '');
     item.setSavePath(savePath); downloadItems.set(request.id,item);
-    const snapshot=(state,error='')=>({id:request.id,name:path.basename(savePath),subDir:request.subDir||'',url:request.url||'',path:savePath,state,error,received:item.getReceivedBytes(),total:item.getTotalBytes(),percent:item.getTotalBytes()>0?Math.round(item.getReceivedBytes()/item.getTotalBytes()*100):0});
+    const snapshot=(state,error='')=>({
+      id:request.id,
+      name:path.basename(savePath),
+      subDir:request.subDir||'',
+      url:request.url||'',
+      path:savePath,
+      state,
+      error,
+      received:item.getReceivedBytes(),
+      total:item.getTotalBytes(),
+      percent:item.getTotalBytes()>0?Math.round(item.getReceivedBytes()/item.getTotalBytes()*100):0,
+      urlChain:typeof item.getURLChain==='function'?item.getURLChain():(request.urlChain||[request.url].filter(Boolean)),
+      eTag:typeof item.getETag==='function'?item.getETag():(request.eTag||''),
+      lastModified:typeof item.getLastModifiedTime==='function'?item.getLastModifiedTime():(request.lastModified||''),
+      startTime:typeof item.getStartTime==='function'?item.getStartTime():(request.startTime||0)
+    });
     emitDownload(snapshot('progress'));
     item.on('updated',(_e,state)=>emitDownload(snapshot(state==='interrupted'?'interrupted':'progress')));
     item.once('done',(_e,state)=>{downloadItems.delete(request.id);activeDownloads=Math.max(0,activeDownloads-1);emitDownload(snapshot(state,state==='interrupted'?'下载中断':''));scheduleDownloads()});
@@ -557,7 +572,7 @@ ipcMain.handle('upload:retry',(_,id)=>{
   scheduleUploads();
   return task;
 });
-ipcMain.handle('download:retry',(_,id)=>{
+ipcMain.handle('download:retry',async(_,id)=>{
   id=String(id||'');
   const existing=downloadHistory.find(item=>item.id===id);
   if(!existing)throw new Error('未找到该下载任务');
@@ -565,7 +580,40 @@ ipcMain.handle('download:retry',(_,id)=>{
   if(!mainWindow||mainWindow.isDestroyed())throw new Error('主窗口不可用');
   const alreadyQueued=downloadQueue.some(entry=>entry.task.id===id);
   if(alreadyQueued)return existing;
-  const task={id,name:existing.name,subDir:existing.subDir||'',url:existing.url,state:'queued',received:0,total:existing.total||0,percent:0};
+
+  let localSize=0;
+  if(existing.path){
+    try{
+      const stat=await fs.promises.stat(existing.path);
+      localSize=stat.size;
+    }catch{}
+  }
+
+  const resumeOpts=buildInterruptedDownloadOptions({task:existing,localSize});
+  if(resumeOpts){
+    try{
+      activeDownloads++;
+      const timer=setTimeout(()=>{
+        const idx=pendingDownloads.findIndex(p=>p.task.id===existing.id);
+        if(idx>=0){
+          pendingDownloads.splice(idx,1);
+          activeDownloads=Math.max(0,activeDownloads-1);
+          logger.warn('download','Resume initiation timed out',{id:existing.id,name:existing.name});
+          emitDownload({...existing,state:'failed',error:'断点续传超时，请重试'});
+          scheduleDownloads();
+        }
+      },10000);
+      pendingDownloads.push({task:{...existing,state:'queued',received:localSize,percent:existing.total>0?Math.round(localSize/existing.total*100):0},timer});
+      session.defaultSession.createInterruptedDownload(resumeOpts);
+      logger.info('download','Resuming download via createInterruptedDownload',{id:existing.id,offset:resumeOpts.offset});
+      return existing;
+    }catch(err){
+      logger.warn('download','createInterruptedDownload failed, falling back to regular download',err);
+      activeDownloads=Math.max(0,activeDownloads-1);
+    }
+  }
+
+  const task={...existing,state:'queued',received:0,percent:0};
   logger.info('download','Download task retried',{id:task.id,name:task.name,subDir:task.subDir});
   downloadQueue.push({task,url:existing.url});
   emitDownload(task);

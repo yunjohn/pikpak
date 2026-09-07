@@ -176,4 +176,35 @@ function generateUniqueName(name, existingNames) {
   return candidate;
 }
 
-module.exports = { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, matchSubtitles, detectConflicts, generateUniqueName };
+function buildInterruptedDownloadOptions(params) {
+  if (!params || typeof params !== 'object') return null;
+  const { task, localSize = 0 } = params;
+  if (!task || typeof task !== 'object') return null;
+  const filePath = String(task.path || '').trim();
+  if (!filePath) return null;
+
+  const total = Number(task.total || 0);
+  const offset = Number(localSize);
+
+  if (!Number.isFinite(offset) || offset <= 0 || (total > 0 && offset >= total)) {
+    return null;
+  }
+
+  const urlChain = Array.isArray(task.urlChain) && task.urlChain.length
+    ? task.urlChain.filter(u => typeof u === 'string' && /^https?:\/\//i.test(u))
+    : (task.url && /^https?:\/\//i.test(task.url) ? [task.url] : []);
+
+  if (!urlChain.length) return null;
+
+  return {
+    path: filePath,
+    urlChain,
+    offset,
+    length: total > offset ? total : 0,
+    lastModified: String(task.lastModified || ''),
+    eTag: String(task.eTag || ''),
+    startTime: Number(task.startTime) || Math.floor(Date.now() / 1000)
+  };
+}
+
+module.exports = { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, matchSubtitles, detectConflicts, generateUniqueName, buildInterruptedDownloadOptions };

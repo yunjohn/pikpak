@@ -3,8 +3,10 @@ const path = require('node:path');
 const { execSync } = require('node:child_process');
 
 const root = 'D:\\dev\\pikpak';
-const staging = path.join(root, 'release', 'app-staging-0390');
-const asarOut = path.join(root, 'release', 'app-0.39.0.asar');
+const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+const version = pkg.version || '0.40.0';
+const staging = path.join(root, 'release', `app-staging-${version.replace(/\./g, '')}`);
+const asarOut = path.join(root, 'release', `app-${version}.asar`);
 const targetAsar = path.join(root, 'release', 'win-unpacked', 'resources', 'app.asar');
 
 console.log('Staging app files to:', staging);
