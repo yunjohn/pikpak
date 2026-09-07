@@ -56,6 +56,8 @@ describe('image viewer',()=>{
     };
     dom.window.eval(fs.readFileSync(new URL('../electron/viewer.js',import.meta.url),'utf8'));
     await new Promise(resolve=>setTimeout(resolve,0));
+    expect(dom.window.document.querySelector('select[title="播放速度"]')).not.toBeNull();
+    expect([...dom.window.document.querySelector('select[title="播放速度"]').options].map(option=>option.textContent)).toEqual(['0.5×','0.75×','1×','1.25×','1.5×','2×']);
     expect([...dom.window.document.querySelectorAll('.video-tools button')].map(button=>button.textContent)).toEqual(['字幕','截图']);
     dom.window.document.querySelector('.video-tools button').click();
     await new Promise(resolve=>setTimeout(resolve,0));
@@ -75,6 +77,34 @@ describe('image viewer',()=>{
     delayButtons[2].click(); // reset 0s
     expect(dom.window.document.querySelector('.video-tools button').textContent).toBe('字幕：中文.srt');
 
+    dom.window.close();
+  });
+
+  it('supports playback shortcuts and preserves position while switching quality',async()=>{
+    const dom=new JSDOM('<main id="viewer"></main>',{url:'https://local.test/viewer.html?token=playback',runScripts:'outside-only'});
+    dom.window.TextDecoder=TextDecoder;
+    let playCalls=0,pauseCalls=0;
+    dom.window.HTMLMediaElement.prototype.pause=()=>{pauseCalls++};
+    dom.window.HTMLMediaElement.prototype.load=()=>{};
+    dom.window.HTMLMediaElement.prototype.play=()=>{playCalls++;return Promise.resolve()};
+    dom.window.viewerPayload={get:async()=>({url:'https://example.test/720.mp4',name:'电影.mp4',kind:'video',fileId:'movie',sources:[{url:'https://example.test/720.mp4',label:'720P'},{url:'https://example.test/1080.mp4',label:'1080P'}],items:[]})};
+    dom.window.eval(fs.readFileSync(new URL('../electron/viewer.js',import.meta.url),'utf8'));
+    await new Promise(resolve=>setTimeout(resolve,0));
+    const video=dom.window.document.querySelector('video'),quality=dom.window.document.querySelector('select[title="清晰度"]'),speed=dom.window.document.querySelector('select[title="播放速度"]');
+    Object.defineProperty(video,'duration',{configurable:true,value:120});
+    Object.defineProperty(video,'paused',{configurable:true,value:false});
+    video.currentTime=42;video.volume=.5;
+    quality.value='1';quality.dispatchEvent(new dom.window.Event('change'));
+    video.dispatchEvent(new dom.window.Event('loadedmetadata'));
+    expect(video.currentTime).toBe(42);
+    expect(playCalls).toBeGreaterThan(0);
+    speed.value='1.5';speed.dispatchEvent(new dom.window.Event('change'));
+    expect(video.playbackRate).toBe(1.5);
+    dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'ArrowRight'}));
+    expect(video.currentTime).toBe(47);
+    dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'m'}));
+    expect(video.muted).toBe(true);
+    expect(pauseCalls).toBeGreaterThan(0);
     dom.window.close();
   });
 
