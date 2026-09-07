@@ -192,7 +192,7 @@ function installDownloadManager() {
     const request=pending?.task || {id:crypto.randomUUID(),name:item.getFilename()};
     const savePath=uniqueDownloadPath(request.name || item.getFilename());
     item.setSavePath(savePath); downloadItems.set(request.id,item);
-    const snapshot=(state,error='')=>({id:request.id,name:path.basename(savePath),path:savePath,state,error,received:item.getReceivedBytes(),total:item.getTotalBytes(),percent:item.getTotalBytes()>0?Math.round(item.getReceivedBytes()/item.getTotalBytes()*100):0});
+    const snapshot=(state,error='')=>({id:request.id,name:path.basename(savePath),url:request.url||'',path:savePath,state,error,received:item.getReceivedBytes(),total:item.getTotalBytes(),percent:item.getTotalBytes()>0?Math.round(item.getReceivedBytes()/item.getTotalBytes()*100):0});
     emitDownload(snapshot('progress'));
     item.on('updated',(_e,state)=>emitDownload(snapshot(state==='interrupted'?'interrupted':'progress')));
     item.once('done',(_e,state)=>{downloadItems.delete(request.id);activeDownloads=Math.max(0,activeDownloads-1);emitDownload(snapshot(state,state==='interrupted'?'下载中断':''));scheduleDownloads()});
@@ -200,6 +200,13 @@ function installDownloadManager() {
 }
 
 function uploadsPath(){return path.join(app.getPath('userData'),'uploads.json')}
+function uploadResumesPath(){return path.join(app.getPath('userData'),'upload_resumes.json')}
+let uploadResumes={};
+let uploadResumesTimer=null;
+function loadUploadResumes(){try{const value=JSON.parse(fs.readFileSync(uploadResumesPath(),'utf8'));uploadResumes=value&&typeof value==='object'&&!Array.isArray(value)?value:{}}catch{uploadResumes={}}}
+function flushUploadResumes(){try{const target=uploadResumesPath();fs.mkdirSync(path.dirname(target),{recursive:true});fs.writeFileSync(target,JSON.stringify(uploadResumes,null,2))}catch(error){logger.warn('upload','Failed to save upload resumes',error)}}
+function saveUploadResumes(){clearTimeout(uploadResumesTimer);uploadResumesTimer=setTimeout(flushUploadResumes,300)}
+
 function playbackPath(){return path.join(app.getPath('userData'),'playback.json')}
 function loadPlaybackHistory(){try{const value=JSON.parse(fs.readFileSync(playbackPath(),'utf8'));playbackHistory=value&&typeof value==='object'&&!Array.isArray(value)?value:{}}catch{playbackHistory={}}}
 function flushPlaybackHistory(){try{const entries=Object.entries(playbackHistory).sort((a,b)=>Number(b[1]?.updatedAt||0)-Number(a[1]?.updatedAt||0)).slice(0,1000);playbackHistory=Object.fromEntries(entries);const target=playbackPath();fs.mkdirSync(path.dirname(target),{recursive:true});fs.writeFileSync(target,JSON.stringify(playbackHistory,null,2))}catch(error){logger.warn('playback','Failed to save playback history',error)}}
@@ -223,27 +230,74 @@ async function calculateUploadHash(filePath,size,onProgress,signal){
 }
 function ossEncode(value){return encodeURIComponent(String(value)).replace(/[!'()*]/g,char=>`%${char.charCodeAt(0).toString(16).toUpperCase()}`)}
 function ossQuery(value='',encode=false){return String(value).split('&').filter(Boolean).map(part=>{const index=part.indexOf('=');return index<0?[part,null]:[part.slice(0,index),part.slice(index+1)]}).sort((a,b)=>a[0].localeCompare(b[0])).map(([key,val])=>val===null?key:`${key}=${encode?ossEncode(val):val}`).join('&')}
-async function uploadToOss(filePath,size,mime,params,controller,onProgress){
+async function uploadToOss(filePath,size,mime,params,controller,onProgress,resumeKey=''){
   const objectPath=String(params.key).split('/').map(ossEncode).join('/'),endpoint=String(params.endpoint||'').replace(/^https?:\/\//i,'').replace(/\/+$/,''),host=params.cname===true||String(params.cname).toLowerCase()==='true'?`https://${endpoint}`:`https://${params.bucket}.${endpoint}`;
   const request=async(method,query='',body=null,contentType='')=>{const date=new Date().toUTCString(),canonical=ossQuery(query),resource=`/${params.bucket}/${objectPath}${canonical?'?'+canonical:''}`,headersBlock=`x-oss-date:${date}\nx-oss-security-token:${params.security_token}`,signText=[method,'',contentType,date,headersBlock,resource].join('\n'),signature=crypto.createHmac('sha1',params.access_key_secret).update(signText).digest('base64'),headers={Authorization:`OSS ${params.access_key_id}:${signature}`,'x-oss-date':date,'x-oss-security-token':params.security_token};if(contentType)headers['content-type']=contentType;const response=await fetch(`${host}/${objectPath}${query?'?'+ossQuery(query,true):''}`,{method,headers,body,signal:controller.signal});const text=await response.text();if(!response.ok)throw new Error(`OSS ${method} 失败 (${response.status})`);return {text,headers:response.headers}};
-  const init=await request('POST','uploads'),uploadId=init.text.match(/<UploadId>([^<]+)<\/UploadId>/i)?.[1];if(!uploadId)throw new Error('未获取到分片上传 ID');
-  let partSize=1024*1024;while(size/partSize>10000)partSize*=2;const parts=[],handle=await fs.promises.open(filePath,'r');
-  try{for(let number=1,offset=0;offset<size;number++,offset+=partSize){const chunk=await readFileRange(handle,offset,Math.min(partSize,size-offset)),result=await request('PUT',`partNumber=${number}&uploadId=${uploadId}`,chunk,mime),etag=result.headers.get('etag');if(!etag)throw new Error(`上传分片 ${number} 缺少 ETag`);parts.push({number,etag});onProgress(Math.round(Math.min(size,offset+chunk.length)/Math.max(1,size)*100))}}finally{await handle.close()}
-  const xml=`<CompleteMultipartUpload>${parts.map(part=>`<Part><PartNumber>${part.number}</PartNumber><ETag>${part.etag}</ETag></Part>`).join('')}</CompleteMultipartUpload>`;await request('POST',`uploadId=${uploadId}`,xml,'application/xml');
+
+  let uploadId='',parts=[];
+  if(resumeKey&&uploadResumes[resumeKey]?.uploadId&&uploadResumes[resumeKey]?.objectPath===objectPath){
+    uploadId=uploadResumes[resumeKey].uploadId;
+    parts=Array.isArray(uploadResumes[resumeKey].parts)?[...uploadResumes[resumeKey].parts]:[];
+    logger.info('upload','Resuming multipart upload from saved state',{uploadId,completedParts:parts.length});
+  }else{
+    const init=await request('POST','uploads');
+    uploadId=init.text.match(/<UploadId>([^<]+)<\/UploadId>/i)?.[1];
+    if(!uploadId)throw new Error('未获取到分片上传 ID');
+    if(resumeKey){
+      uploadResumes[resumeKey]={uploadId,objectPath,parts:[],createdAt:Date.now()};
+      saveUploadResumes();
+    }
+  }
+
+  let partSize=1024*1024;while(size/partSize>10000)partSize*=2;
+  const completedMap=new Map(parts.map(p=>[Number(p.number),String(p.etag)]));
+  const handle=await fs.promises.open(filePath,'r');
+  try{
+    for(let number=1,offset=0;offset<size;number++,offset+=partSize){
+      const chunkLength=Math.min(partSize,size-offset);
+      if(completedMap.has(number)){
+        onProgress(Math.round(Math.min(size,offset+chunkLength)/Math.max(1,size)*100));
+        continue;
+      }
+      const chunk=await readFileRange(handle,offset,chunkLength);
+      const result=await request('PUT',`partNumber=${number}&uploadId=${uploadId}`,chunk,mime);
+      const etag=result.headers.get('etag');
+      if(!etag)throw new Error(`上传分片 ${number} 缺少 ETag`);
+      parts.push({number,etag});
+      completedMap.set(number,etag);
+      if(resumeKey&&uploadResumes[resumeKey]){
+        uploadResumes[resumeKey].parts=parts;
+        saveUploadResumes();
+      }
+      onProgress(Math.round(Math.min(size,offset+chunk.length)/Math.max(1,size)*100));
+    }
+  }finally{await handle.close()}
+
+  parts.sort((a,b)=>Number(a.number)-Number(b.number));
+  const xml=`<CompleteMultipartUpload>${parts.map(part=>`<Part><PartNumber>${part.number}</PartNumber><ETag>${part.etag}</ETag></Part>`).join('')}</CompleteMultipartUpload>`;
+  await request('POST',`uploadId=${uploadId}`,xml,'application/xml');
+
+  if(resumeKey&&uploadResumes[resumeKey]){
+    delete uploadResumes[resumeKey];
+    saveUploadResumes();
+  }
 }
 async function startLocalUpload(filePath,parentId='',id=crypto.randomUUID()){
   const stat=await fs.promises.stat(filePath);if(!stat.isFile())throw new Error('请选择有效文件');const name=path.basename(filePath),controller=new AbortController();uploadControllers.set(id,controller);
-  const emit=(state,percent=0,error='')=>uploadEvent({id,name,size:stat.size,state,percent,error});
+  const emit=(state,percent=0,error='')=>uploadEvent({id,name,size:stat.size,filePath,parentId,state,percent,error});
   try{
     emit('hashing');const hashes=await calculateUploadHash(filePath,stat.size,percent=>emit('hashing',percent),controller.signal);const account=readAccount();if(!account.accessToken)throw new Error('请先连接 PikPak 账户');
     let gcid=hashes.gcid;try{const query=new URLSearchParams({cid:hashes.cid.toLowerCase(),file_size:String(stat.size)}),known=await apiRequest(`https://api-drive.mypikpak.com/drive/v1/resource/cid?${query}`,{action:'GET:/drive/v1/resource/cid',authorization:account.accessToken});if(known.gcid)gcid=String(known.gcid).toUpperCase()}catch{}
     const data=await driveMutation('/drive/v1/files',{body:{hash:gcid,name,size:String(stat.size),kind:'drive#file',id:'',parent_id:String(parentId||''),upload_type:'UPLOAD_TYPE_RESUMABLE',folder_type:'NORMAL',resumable:{provider:'PROVIDER_ALIYUN'}}});
     if(data.upload_type==='UPLOAD_TYPE_URL'||data.phase==='PHASE_TYPE_COMPLETE'||data.file?.phase==='PHASE_TYPE_COMPLETE'){emit('completed',100);return}
-    const params=data.resumable?.params;if(!params)throw new Error('PikPak 未返回上传凭证');emit('uploading');await uploadToOss(filePath,stat.size,'application/octet-stream',params,controller,percent=>emit('uploading',percent));emit('completed',100);
+    const params=data.resumable?.params;if(!params)throw new Error('PikPak 未返回上传凭证');emit('uploading');
+    const resumeKey=crypto.createHash('sha1').update(`${filePath}:${stat.size}:${Math.floor(stat.mtimeMs)}:${gcid}`).digest('hex');
+    await uploadToOss(filePath,stat.size,'application/octet-stream',params,controller,percent=>emit('uploading',percent),resumeKey);
+    emit('completed',100);
   }catch(error){emit(error.name==='AbortError'?'cancelled':'failed',0,error.name==='AbortError'?'已取消':error.message);throw error}finally{uploadControllers.delete(id)}
 }
 function scheduleUploads(){while(activeUploads<settings.uploadConcurrency&&uploadQueue.length){const entry=uploadQueue.shift();activeUploads++;startLocalUpload(entry.filePath,entry.parentId,entry.task.id).catch(()=>{}).finally(()=>{activeUploads--;scheduleUploads()})}}
-function queueUploadFile(filePath,parentId,stat,tasks){const task={id:crypto.randomUUID(),name:path.basename(filePath),size:stat.size,state:'queued',percent:0};logger.info('upload','Upload task queued',{id:task.id,name:task.name,size:stat.size});tasks.push(task);uploadQueue.push({filePath,parentId,task});uploadEvent(task)}
+function queueUploadFile(filePath,parentId,stat,tasks){const task={id:crypto.randomUUID(),name:path.basename(filePath),size:stat.size,filePath,parentId,state:'queued',percent:0};logger.info('upload','Upload task queued',{id:task.id,name:task.name,size:stat.size});tasks.push(task);uploadQueue.push({filePath,parentId,task});uploadEvent(task)}
 async function createRemoteFolder(name,parentId){const data=await driveMutation('/drive/v1/files',{body:{kind:'drive#folder',parent_id:parentId||'',name:String(name||'').trim()}}),file=data?.file||data?.data?.file||data;if(!file?.id)throw new Error(`创建远程目录失败：${name}`);return String(file.id)}
 async function enqueueDirectory(localDir,parentId,tasks,counter){
   const remoteId=await createRemoteFolder(path.basename(localDir),parentId),entries=await fs.promises.readdir(localDir,{withFileTypes:true});counter.dirs++;
@@ -371,16 +425,33 @@ ipcMain.handle('drive:list', async (_, parentId='') => {
   const account = readAccount(); if (!account.accessToken) throw new Error('请先连接 PikPak 账户');
   return listPages(pageToken=>{const query=new URLSearchParams({parent_id:parentId,limit:'100',thumbnail_size:'SIZE_LARGE',with_audit:'true'});if(pageToken)query.set('page_token',pageToken);return `https://api-drive.mypikpak.com/drive/v1/files?${query}`},{action:'GET:/drive/v1/files',authorization:account.accessToken});
 });
+let activeSearchController = null;
 ipcMain.handle('drive:search',async(_,rawQuery)=>{
   const query=String(rawQuery||'').trim().toLocaleLowerCase();if(query.length<2)throw new Error('全盘搜索至少输入 2 个字符');const account=readAccount();if(!account.accessToken)throw new Error('请先连接 PikPak 账户');
+  if(activeSearchController){activeSearchController.abort();activeSearchController=null}
+  const controller=new AbortController();activeSearchController=controller;
   const pending=[{id:'',names:[]}],visited=new Set(),matches=[];let scanned=0,truncated=false;
-  while(pending.length&&visited.size<5000&&scanned<50000&&matches.length<500){
-    const batch=[];while(pending.length&&batch.length<4){const folder=pending.shift();if(!visited.has(folder.id)){visited.add(folder.id);batch.push(folder)}}
-    const results=await Promise.all(batch.map(async folder=>{const value=await listPages(pageToken=>{const params=new URLSearchParams({parent_id:folder.id,limit:'100',thumbnail_size:'SIZE_MEDIUM'});if(pageToken)params.set('page_token',pageToken);return `https://api-drive.mypikpak.com/drive/v1/files?${params}`},{action:'GET:/drive/v1/files',authorization:account.accessToken});return {folder,files:value.files}}));
-    for(const result of results){for(const item of result.files){scanned++;const names=[...result.folder.names,item.name||''];if(String(item.name||'').toLocaleLowerCase().includes(query))matches.push({...item,_search_path:names.join(' / '),_search_parent_id:result.folder.id});if(item.kind==='drive#folder'&&!visited.has(item.id))pending.push({id:item.id,names});if(scanned>=50000||matches.length>=500)break}}
+  try{
+    while(pending.length&&visited.size<5000&&scanned<50000&&matches.length<500){
+      if(controller.signal.aborted)throw new DOMException('Search aborted','AbortError');
+      const batch=[];while(pending.length&&batch.length<4){const folder=pending.shift();if(!visited.has(folder.id)){visited.add(folder.id);batch.push(folder)}}
+      const results=await Promise.all(batch.map(async folder=>{
+        if(controller.signal.aborted)throw new DOMException('Search aborted','AbortError');
+        const value=await listPages(pageToken=>{const params=new URLSearchParams({parent_id:folder.id,limit:'100',thumbnail_size:'SIZE_MEDIUM'});if(pageToken)params.set('page_token',pageToken);return `https://api-drive.mypikpak.com/drive/v1/files?${params}`},{action:'GET:/drive/v1/files',authorization:account.accessToken});return {folder,files:value.files};
+      }));
+      for(const result of results){for(const item of result.files){scanned++;const names=[...result.folder.names,item.name||''];if(String(item.name||'').toLocaleLowerCase().includes(query))matches.push({...item,_search_path:names.join(' / '),_search_parent_id:result.folder.id});if(item.kind==='drive#folder'&&!visited.has(item.id))pending.push({id:item.id,names});if(scanned>=50000||matches.length>=500)break}}
+      if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('search:progress',{scanned,folders:visited.size,matchesCount:matches.length,isDone:false});
+    }
+    if(pending.length||visited.size>=5000||scanned>=50000||matches.length>=500)truncated=true;return {files:matches,scanned,folders:visited.size,truncated};
+  }catch(err){
+    if(err.name==='AbortError')return {files:matches,scanned,folders:visited.size,truncated:true,cancelled:true};
+    throw err;
+  }finally{
+    if(activeSearchController===controller)activeSearchController=null;
+    if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('search:progress',{scanned,folders:visited.size,matchesCount:matches.length,isDone:true});
   }
-  if(pending.length||visited.size>=5000||scanned>=50000||matches.length>=500)truncated=true;return {files:matches,scanned,folders:visited.size,truncated};
 });
+ipcMain.handle('drive:search-cancel',()=>{if(activeSearchController){activeSearchController.abort();activeSearchController=null;return true}return false});
 ipcMain.handle('drive:file-info', async (_, fileId) => {
   const account = readAccount(); if (!account.accessToken) throw new Error('请先连接 PikPak 账户');
   return apiRequest(`https://api-drive.mypikpak.com/drive/v1/files/${encodeURIComponent(fileId)}?thumbnail_size=SIZE_LARGE`, { action:'GET:/drive/v1/files/{id}', authorization:account.accessToken });
@@ -416,7 +487,7 @@ ipcMain.handle('trash:delete',(_,ids)=>driveMutation('/drive/v1/files:batchDelet
 ipcMain.handle('download:start',(_,{url,name})=>{
   if(!/^https?:\/\//i.test(String(url||'')))throw new Error('无效的下载地址');
   if(!mainWindow||mainWindow.isDestroyed())throw new Error('主窗口不可用');
-  const task={id:crypto.randomUUID(),name:safeFilename(name),state:'queued',received:0,total:0,percent:0};
+  const task={id:crypto.randomUUID(),name:safeFilename(name),url:String(url),state:'queued',received:0,total:0,percent:0};
   logger.info('download','Download task queued',{id:task.id,name:task.name});
   downloadQueue.push({task,url});emitDownload(task);scheduleDownloads();return task;
 });
@@ -461,6 +532,36 @@ ipcMain.handle('download:list',()=>downloadHistory);
 ipcMain.handle('download:remove',(_,id)=>{downloadHistory=downloadHistory.filter(item=>item.id!==id);saveDownloadHistory();return downloadHistory});
 ipcMain.handle('download:clear',()=>{downloadHistory=downloadHistory.filter(item=>['queued','progress'].includes(item.state));saveDownloadHistory();return downloadHistory});
 
+ipcMain.handle('upload:retry',(_,id)=>{
+  id=String(id||'');
+  const existing=uploadHistory.find(item=>item.id===id);
+  if(!existing)throw new Error('未找到该上传任务');
+  if(!existing.filePath||!fs.existsSync(existing.filePath))throw new Error('本地源文件不存在，无法重试');
+  const alreadyQueued=uploadQueue.some(entry=>entry.task.id===id);
+  if(alreadyQueued)return existing;
+  const task={id,name:existing.name||path.basename(existing.filePath),size:existing.size||0,filePath:existing.filePath,parentId:existing.parentId||'',state:'queued',percent:0};
+  logger.info('upload','Upload task retried',{id:task.id,name:task.name});
+  uploadQueue.push({filePath:existing.filePath,parentId:existing.parentId||'',task});
+  uploadEvent(task);
+  scheduleUploads();
+  return task;
+});
+ipcMain.handle('download:retry',(_,id)=>{
+  id=String(id||'');
+  const existing=downloadHistory.find(item=>item.id===id);
+  if(!existing)throw new Error('未找到该下载任务');
+  if(!existing.url||!/^https?:\/\//i.test(existing.url))throw new Error('下载地址缺失或无效，无法重试');
+  if(!mainWindow||mainWindow.isDestroyed())throw new Error('主窗口不可用');
+  const alreadyQueued=downloadQueue.some(entry=>entry.task.id===id);
+  if(alreadyQueued)return existing;
+  const task={id,name:existing.name,url:existing.url,state:'queued',received:0,total:existing.total||0,percent:0};
+  logger.info('download','Download task retried',{id:task.id,name:task.name});
+  downloadQueue.push({task,url:existing.url});
+  emitDownload(task);
+  scheduleDownloads();
+  return task;
+});
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1380, height: 860, minWidth: 980, minHeight: 640, title:'PikPak Desktop',
@@ -484,6 +585,7 @@ function createWindow() {
   else win.loadFile(path.join(__dirname,'..','dist','index.html'));
 }
 
-app.whenReady().then(() => { logger.init(app.getPath('userData')); logger.info('app', 'Application ready', { version: app.getVersion() }); loadSettings();loadDownloadHistory();loadUploadHistory();loadPlaybackHistory();installPikPakSessionCapture(); installDownloadManager(); createWindow(); app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); }); });
-app.on('before-quit',()=>{clearTimeout(downloadSaveTimer);clearTimeout(uploadSaveTimer);clearTimeout(playbackSaveTimer);flushDownloadHistory();flushUploadHistory();flushPlaybackHistory()});
+app.whenReady().then(() => { logger.init(app.getPath('userData')); logger.info('app', 'Application ready', { version: app.getVersion() }); loadSettings();loadDownloadHistory();loadUploadHistory();loadPlaybackHistory();loadUploadResumes();installPikPakSessionCapture(); installDownloadManager(); createWindow(); app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); }); });
+app.on('before-quit',()=>{clearTimeout(downloadSaveTimer);clearTimeout(uploadSaveTimer);clearTimeout(playbackSaveTimer);clearTimeout(uploadResumesTimer);flushDownloadHistory();flushUploadHistory();flushPlaybackHistory();flushUploadResumes()});
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+
