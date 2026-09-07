@@ -20,6 +20,7 @@ const thumbFailed=ref({});
 const dragUpload=ref(false);
 const archive=ref({open:false,name:'',items:[],path:'',nodes:[],password:'',loading:false,error:'',request:null});
 const shareSaveDialog=ref({open:false,purpose:'share',pendingUrl:'',targetId:'',targetName:'根目录',folders:[],loading:false,path:[{id:'',name:'根目录'}]});
+const shareCreateDialog=ref({open:false,expirationDays:7,encrypted:true,items:[]});
 const conflictDialog=ref({open:false,operation:'copy',conflicts:[],nonConflicts:[],targetId:'',targetName:'',loading:false});
 const batchResultModal=ref({open:false,title:'批量操作完成',operation:'',successCount:0,skipCount:0,failCount:0,details:[]});
 const query=ref(''), sortBy=ref('name'), sortDirection=ref(1);
@@ -182,7 +183,8 @@ async function confirmSaveTarget(toParentId=''){
     }
   });
 }
-async function createShareSelected(){if(!selectedItems.value.length)return;await run(async()=>{const result=await api.createShare({ids:selectedItems.value.map(item=>item.id),expirationDays:7,encrypted:true});notice.value=`分享链接已复制${result.passCode?`，提取码 ${result.passCode}`:''}`;setTimeout(()=>{notice.value=''},6000)})}
+async function createShareSelected(){const items=selectedItems.value.slice();if(!items.length)return;shareCreateDialog.value={open:true,expirationDays:7,encrypted:true,items}}
+async function confirmCreateShare(){const state=shareCreateDialog.value,items=state.items.slice();if(!items.length)return;state.open=false;await run(async()=>{const result=await api.createShare({ids:items.map(item=>item.id),expirationDays:Number(state.expirationDays),encrypted:state.encrypted});notice.value=`已创建${state.encrypted?'加密':'公开'}分享并复制链接${result.passCode?`，提取码 ${result.passCode}`:''}`;setTimeout(()=>{notice.value=''},6000)})}
 async function copyMyShare(){if(selectedItems.value.length!==1)return;const item=selectedItems.value[0];await api.copyShare({shareUrl:item.share_url,passCode:item.pass_code});notice.value=`“${item.name}”的链接已复制`;setTimeout(()=>{notice.value=''},3500)}
 async function cancelMyShares(){if(!selectedItems.value.length||!window.confirm(`取消选中的 ${selectedItems.value.length} 个分享？原网盘文件不会被删除。`))return;await run(async()=>{await api.cancelShares(selectedItems.value.map(item=>item.id));notice.value='分享已取消';await loadMyShares();setTimeout(()=>{notice.value=''},3500)})}
 function offlineName(task){return task.name||task.file_name||task.reference_resource?.name||task.source_url||'离线任务'}
@@ -356,11 +358,12 @@ async function deleteForever(){
 function navigateCrumb(index){const target=pathStack.value[index];pathStack.value=pathStack.value.slice(0,index+1);if(mode.value==='drive')loadDrive(target.id,target.name,'replace');else if(target.url)loadShare(target.url,target.name,false)}
 function refreshCurrent(){if(mode.value==='drive')loadDrive(pathStack.value.at(-1)?.id,'','replace');else if(mode.value==='share'&&share.value){pathStack.value.pop();loadShare(share.value.url,pathStack.value.at(-1)?.name||'分享目录',false)}}
 function hasActiveModal(){
-  return Boolean(archive.value?.open || shareSaveDialog.value?.open || conflictDialog.value?.open || batchResultModal.value?.open);
+  return Boolean(archive.value?.open || shareSaveDialog.value?.open || shareCreateDialog.value?.open || conflictDialog.value?.open || batchResultModal.value?.open);
 }
 function closeActiveModal(){
   if(batchResultModal.value?.open){batchResultModal.value.open=false;return true}
   if(conflictDialog.value?.open){conflictDialog.value.open=false;return true}
+  if(shareCreateDialog.value?.open){shareCreateDialog.value.open=false;return true}
   if(shareSaveDialog.value?.open){shareSaveDialog.value.open=false;return true}
   if(archive.value?.open){archive.value.open=false;return true}
   return false;
@@ -645,6 +648,16 @@ onUnmounted(()=>{
           <button class="soft" @click="confirmSaveTarget('')">{{shareSaveDialog.purpose==='offline'?'使用默认下载目录':'直接保存到根目录'}}</button>
           <button class="primary" @click="confirmSaveTarget(shareSaveDialog.targetId)">{{shareSaveDialog.purpose==='offline'?'下载到':'保存到当前目录'}} ({{shareSaveDialog.targetName}})</button>
         </footer>
+      </section>
+    </div>
+    <div v-if="shareCreateDialog.open" class="archive-overlay" @click.self="shareCreateDialog.open=false">
+      <section class="archive-dialog share-create-dialog" role="dialog" aria-modal="true" aria-label="创建分享">
+        <header><div><small>创建 PikPak 分享</small><h2>分享 {{shareCreateDialog.items.length}} 项文件</h2></div><button class="remove" title="关闭" @click="shareCreateDialog.open=false">×</button></header>
+        <div class="share-create-body">
+          <label><span><b>有效期</b><small>到期后分享链接自动失效</small></span><select v-model.number="shareCreateDialog.expirationDays"><option :value="1">1 天</option><option :value="7">7 天</option><option :value="30">30 天</option><option :value="-1">永久有效</option></select></label>
+          <label><span><b>访问方式</b><small>{{shareCreateDialog.encrypted?'访问者需要输入提取码':'任何获得链接的人均可访问'}}</small></span><select v-model="shareCreateDialog.encrypted"><option :value="true">需要提取码</option><option :value="false">公开链接</option></select></label>
+        </div>
+        <footer class="share-dialog-actions"><button class="soft" @click="shareCreateDialog.open=false">取消</button><button class="primary" @click="confirmCreateShare">创建并复制链接</button></footer>
       </section>
     </div>
     <div v-if="conflictDialog.open" class="archive-overlay" @click.self="conflictDialog.open=false">

@@ -27,6 +27,7 @@
 .toolbar-actions .accent:hover{background:#d5e4fc}
 .share-dialog-actions{display:flex;justify-content:flex-end;gap:10px;align-items:center}
 .share-dialog-actions button{padding:8px 14px;font-size:12px}
+.share-create-dialog{height:auto;max-width:520px}.share-create-body{padding:8px 22px 22px}.share-create-body label{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:16px 0;border-bottom:1px solid #edf0f4}.share-create-body label:last-child{border-bottom:0}.share-create-body span{min-width:0}.share-create-body b,.share-create-body small{display:block}.share-create-body small{margin-top:4px;color:#8d96a6}.share-create-body select{min-width:145px;padding:9px 11px;border:1px solid #cfd6e3;border-radius:8px;background:#fff;color:#273247}
 .conflict-summary{padding:12px 22px;background:#fff8ee;color:#b26a00;font-size:13px;border-bottom:1px solid #faeccd}
 .conflict-dialog-actions,.batch-result-actions{display:flex;justify-content:flex-end;gap:10px;align-items:center}
 .conflict-dialog-actions button,.batch-result-actions button{padding:8px 14px;font-size:12px}

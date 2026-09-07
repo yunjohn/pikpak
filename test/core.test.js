@@ -108,6 +108,7 @@ describe('desktop core', () => {
 
   it('builds a protected seven-day share payload', () => {
     expect(buildCreateSharePayload(['a','a','b'])).toEqual({file_ids:['a','b'],share_to:'encryptedlink',expiration_days:7,pass_code_option:'REQUIRED'});
+    expect(buildCreateSharePayload(['a'],{expirationDays:-1,encrypted:false})).toEqual({file_ids:['a'],share_to:'publiclink',expiration_days:-1,pass_code_option:'NOT_REQUIRED'});
     expect(() => buildCreateSharePayload([])).toThrow('选择');
   });
 
