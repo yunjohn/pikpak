@@ -4,6 +4,9 @@ contextBridge.exposeInMainWorld('viewerProgress', {
   get: fileId => ipcRenderer.invoke('viewer:progress-get', fileId),
   set: payload => ipcRenderer.invoke('viewer:progress-set', payload)
 });
+contextBridge.exposeInMainWorld('viewerPlayback', {
+  setPlaying: value => ipcRenderer.invoke('viewer:playing', Boolean(value))
+});
 contextBridge.exposeInMainWorld('viewerPayload', {
   get: token => ipcRenderer.invoke('viewer:payload-get', token),
   chooseSubtitle: () => ipcRenderer.invoke('viewer:subtitle-choose'),

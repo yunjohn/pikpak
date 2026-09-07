@@ -88,8 +88,9 @@ describe('image viewer',()=>{
     dom.window.HTMLMediaElement.prototype.load=()=>{};
     dom.window.HTMLMediaElement.prototype.play=()=>{playCalls++;return Promise.resolve()};
     dom.window.localStorage.setItem('pikpak-viewer-video-preferences-v1',JSON.stringify({rate:1.25,volume:.4,muted:true,fit:'cover'}));
-    let pipCalls=0;
+    let pipCalls=0;const playingStates=[];
     dom.window.HTMLVideoElement.prototype.requestPictureInPicture=async()=>{pipCalls++};
+    dom.window.viewerPlayback={setPlaying:value=>{playingStates.push(value);return Promise.resolve(playingStates.length)}};
     dom.window.viewerPayload={get:async()=>({url:'https://example.test/720.mp4',name:'电影.mp4',kind:'video',fileId:'movie',sources:[{url:'https://example.test/720.mp4',label:'720P'},{url:'https://example.test/1080.mp4',label:'1080P'}],items:[]})};
     dom.window.eval(fs.readFileSync(new URL('../electron/viewer.js',import.meta.url),'utf8'));
     await new Promise(resolve=>setTimeout(resolve,0));
@@ -118,6 +119,9 @@ describe('image viewer',()=>{
     fit.value='fill';fit.dispatchEvent(new dom.window.Event('change'));
     expect(video.style.objectFit).toBe('fill');
     expect(JSON.parse(dom.window.localStorage.getItem('pikpak-viewer-video-preferences-v1')).fit).toBe('fill');
+    video.dispatchEvent(new dom.window.Event('playing'));
+    video.dispatchEvent(new dom.window.Event('pause'));
+    expect(playingStates).toEqual([true,false]);
     expect(pauseCalls).toBeGreaterThan(0);
     dom.window.close();
   });

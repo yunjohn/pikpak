@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, session, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, powerSaveBlocker, safeStorage, session, shell } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
@@ -21,6 +21,8 @@ let shareBridgeWindow = null;
 let mainWindow = null;
 const viewerWindows = new Set();
 const viewerPayloads = new Map();
+const playingViewers = new Set();
+let playbackPowerBlocker = null;
 let viewerDownloadsBlocked = false;
 const downloadItems = new Map();
 const pendingDownloads = [];
@@ -36,6 +38,11 @@ let uploadSaveTimer = null;
 let playbackHistory = {};
 let playbackSaveTimer = null;
 let settings = { downloadDirectory:'', downloadConcurrency:3, uploadConcurrency:3 };
+
+function updatePlaybackPowerBlocker(){
+  if(playingViewers.size&&playbackPowerBlocker===null)playbackPowerBlocker=powerSaveBlocker.start('prevent-display-sleep');
+  else if(!playingViewers.size&&playbackPowerBlocker!==null){if(powerSaveBlocker.isStarted(playbackPowerBlocker))powerSaveBlocker.stop(playbackPowerBlocker);playbackPowerBlocker=null}
+}
 
 function configPath() { return path.join(app.getPath('userData'), 'account.bin'); }
 function readAccount() {
@@ -539,7 +546,7 @@ ipcMain.handle('viewer:open',async(_,{url,name,fileId='',mimeType,sources=[],ite
   const safeSources=(Array.isArray(sources)?sources:[]).slice(0,10).map(source=>({url:String(source?.url||''),label:String(source?.label||'清晰度').slice(0,30)})).filter(source=>/^https?:\/\//i.test(source.url));
   const safeItems=(Array.isArray(items)?items:[]).slice(0,60).map(item=>({id:String(item?.id||''),name:String(item?.name||'图片').slice(0,300),url:String(item?.url||'')})).filter(item=>/^https?:\/\//i.test(item.url));
   const safeSubtitles=(Array.isArray(subtitles)?subtitles:[]).slice(0,15).map(sub=>({id:String(sub?.id||''),name:String(sub?.name||'字幕').slice(0,120),url:String(sub?.url||'')})).filter(sub=>/^https?:\/\//i.test(sub.url));
-  const token=crypto.randomUUID();viewerPayloads.set(token,{webContentsId:win.webContents.id,payload:{url:target,name:String(name||'文件查看'),kind,fileId,sources:safeSources,items:safeItems,subtitles:safeSubtitles}});win.on('closed',()=>{viewerWindows.delete(win);viewerPayloads.delete(token)});
+  const token=crypto.randomUUID(),viewerWebContentsId=win.webContents.id;viewerPayloads.set(token,{webContentsId:viewerWebContentsId,payload:{url:target,name:String(name||'文件查看'),kind,fileId,sources:safeSources,items:safeItems,subtitles:safeSubtitles}});win.on('closed',()=>{playingViewers.delete(viewerWebContentsId);updatePlaybackPowerBlocker();viewerWindows.delete(win);viewerPayloads.delete(token)});
   await win.loadFile(path.join(__dirname,'viewer.html'),{query:{token}});return true;
 });
 ipcMain.handle('app:clear-cache',async()=>{
@@ -551,6 +558,7 @@ ipcMain.handle('app:clear-cache',async()=>{
 });
 ipcMain.handle('viewer:payload-get',(event,token)=>{const entry=viewerPayloads.get(String(token||''));if(!entry||entry.webContentsId!==event.sender.id)throw new Error('查看会话已失效，请重新打开文件');return entry.payload});
 function viewerFor(event){const win=BrowserWindow.fromWebContents(event.sender);if(!win||!viewerWindows.has(win))throw new Error('无效的查看窗口');return win}
+ipcMain.handle('viewer:playing',(event,isPlaying)=>{viewerFor(event);if(isPlaying)playingViewers.add(event.sender.id);else playingViewers.delete(event.sender.id);updatePlaybackPowerBlocker();return playingViewers.size});
 ipcMain.handle('viewer:subtitle-choose',async event=>{const win=viewerFor(event),picked=await dialog.showOpenDialog(win,{title:'选择字幕文件',properties:['openFile'],filters:[{name:'字幕文件',extensions:['srt','vtt']}]});if(picked.canceled||!picked.filePaths[0])return null;const filePath=picked.filePaths[0],stat=await fs.promises.stat(filePath);if(stat.size>10*1024*1024)throw new Error('字幕文件不能超过 10 MB');return {name:path.basename(filePath),text:await fs.promises.readFile(filePath,'utf8')}});
 ipcMain.handle('viewer:capture',async(event,payload={})=>{const win=viewerFor(event),rect=payload.rect||{},width=Math.max(1,Math.floor(Number(rect.width)||1)),height=Math.max(1,Math.floor(Number(rect.height)||1)),x=Math.max(0,Math.floor(Number(rect.x)||0)),y=Math.max(0,Math.floor(Number(rect.y)||0));if(width>10000||height>10000)throw new Error('截图区域无效');const image=await win.webContents.capturePage({x,y,width,height}),base=String(payload.name||'视频').replace(/[<>:"/\\|?*\x00-\x1f]/g,'_').slice(0,120),stamp=new Date().toISOString().replace(/[:.]/g,'-'),saved=await dialog.showSaveDialog(win,{title:'保存视频截图',defaultPath:`${base}-${stamp}.png`,filters:[{name:'PNG 图片',extensions:['png']}]});if(saved.canceled||!saved.filePath)return '';await fs.promises.writeFile(saved.filePath,image.toPNG());return saved.filePath});
 ipcMain.handle('viewer:progress-get',(_,fileId)=>{const id=String(fileId||'');return id&&playbackHistory[id]?playbackHistory[id]:{time:0,duration:0}});
@@ -660,6 +668,6 @@ function createWindow() {
 }
 
 app.whenReady().then(() => { logger.init(app.getPath('userData')); restoreDeviceId(); logger.info('app', 'Application ready', { version: app.getVersion() }); loadSettings();loadDownloadHistory();loadUploadHistory();loadPlaybackHistory();loadUploadResumes();installPikPakSessionCapture(); installDownloadManager(); createWindow(); app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); }); });
-app.on('before-quit',()=>{clearTimeout(downloadSaveTimer);clearTimeout(uploadSaveTimer);clearTimeout(playbackSaveTimer);clearTimeout(uploadResumesTimer);flushDownloadHistory();flushUploadHistory();flushPlaybackHistory();flushUploadResumes()});
+app.on('before-quit',()=>{playingViewers.clear();updatePlaybackPowerBlocker();clearTimeout(downloadSaveTimer);clearTimeout(uploadSaveTimer);clearTimeout(playbackSaveTimer);clearTimeout(uploadResumesTimer);flushDownloadHistory();flushUploadHistory();flushPlaybackHistory();flushUploadResumes()});
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 
