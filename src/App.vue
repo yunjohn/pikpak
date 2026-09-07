@@ -153,9 +153,24 @@ function imageViewerItems(current){
     return {id:String(value.id||''),name:value.name||'图片',url:previewUrl(value)};
   }).filter(entry=>/^https?:\/\//i.test(entry.url));
 }
+function videoViewerPlaylist(current){
+  const all=visibleFiles.value.filter(item=>item.kind!=='drive#folder'&&isVideo(item));
+  const index=all.findIndex(entry=>entry.id===current.id);
+  if(index<0)return [];
+  const start=Math.max(0,Math.min(index-50,Math.max(0,all.length-101)));
+  return all.slice(start,start+101).map(entry=>{
+    const value=entry.id===current.id?current:entry;
+    return {
+      fileId:mode.value==='share'?`share:${share.value?.shareId||''}:${value.id}`:`drive:${value.id}`,
+      name:String(value.name||'视频'),
+      url:entry.id===current.id?previewUrl(value):'',
+      sources:entry.id===current.id?playbackSources(value):[]
+    };
+  });
+}
 function matchSubtitles(videoName,fileList){const subExtensions=new Set(['srt','vtt','ass']);const subFiles=(fileList||[]).filter(item=>{if(!item||item.kind==='drive#folder')return false;const ext=String(item.name||'').split('.').pop()?.toLowerCase();return subExtensions.has(ext)});if(!subFiles.length)return [];const baseName=String(videoName||'').replace(/\.[^/.]+$/,'').trim().toLowerCase();const scored=subFiles.map(file=>{const subBase=String(file.name).replace(/\.[^/.]+$/,'').trim().toLowerCase();let score=0;if(subBase===baseName)score=100;else if(subBase.startsWith(baseName))score=80;else if(baseName.startsWith(subBase))score=70;else{const videoTokens=new Set(baseName.split(/[._\-\s]+/).filter(t=>t.length>1)),subTokens=subBase.split(/[._\-\s]+/).filter(t=>t.length>1),overlap=subTokens.filter(t=>videoTokens.has(t)).length;if(overlap>0)score=Math.min(60,overlap*20);else score=10}return {file,score}});return scored.filter(item=>item.score>0).sort((a,b)=>b.score-a.score).map(item=>item.file)}
 async function matchedSubtitlesFor(item){if(!isVideo(item))return [];const subs=matchSubtitles(item.name,files.value).slice(0,5),result=[];for(const sub of subs){let hydrated=sub;if(!contentUrl(hydrated)){try{hydrated=await hydrateFile(sub)}catch{}}const url=contentUrl(hydrated);if(url)result.push({id:sub.id,name:sub.name,url})}return result}
-async function openSelected(){if(selectedItems.value.length!==1)return;const item=await hydrateFile(selectedItems.value[0]);if(!canPreview(item)){error.value='此文件类型暂不支持预览，请明确点击下载按钮后在本机打开';return}if(isArchive(item)){await openArchive(item);return}const url=previewUrl(item);if(!url){error.value='当前文件没有可用的查看地址';return}try{const progressId=mode.value==='share'?`share:${share.value?.shareId||''}:${item.id}`:`drive:${item.id}`;const subtitles=isVideo(item)?await matchedSubtitlesFor(item):[];await api.openViewer({url,name:item.name,fileId:progressId,mimeType:item.mime_type||'',sources:isVideo(item)?playbackSources(item):[],items:isImage(item)?imageViewerItems(item):[],subtitles})}catch(e){error.value=e.message||String(e)}}
+async function openSelected(){if(selectedItems.value.length!==1)return;const item=await hydrateFile(selectedItems.value[0]);if(!canPreview(item)){error.value='此文件类型暂不支持预览，请明确点击下载按钮后在本机打开';return}if(isArchive(item)){await openArchive(item);return}const url=previewUrl(item);if(!url){error.value='当前文件没有可用的查看地址';return}try{const progressId=mode.value==='share'?`share:${share.value?.shareId||''}:${item.id}`:`drive:${item.id}`;const video=isVideo(item),subtitles=video?await matchedSubtitlesFor(item):[];await api.openViewer({url,name:item.name,fileId:progressId,mimeType:item.mime_type||'',sources:video?playbackSources(item):[],items:isImage(item)?imageViewerItems(item):[],subtitles,playlist:video?videoViewerPlaylist(item):[]})}catch(e){error.value=e.message||String(e)}}
 async function itemAction(item,action){selectedIds.value=[item.id];selected.value=item;const actions={open:openSelected,download:downloadSelected,save:saveShareSelected,share:createShareSelected,star:toggleStarred,copy:()=>stageTransfer('copy'),move:()=>stageTransfer('move'),rename:renameSelected,trash:trashSelected,restore:restoreSelected,delete:deleteForever,copyShare:copyMyShare,cancelShare:cancelMyShares};await actions[action]?.()}
 async function loadSaveDialogFolders(parentId){shareSaveDialog.value.loading=true;try{const res=await api.listDrive(parentId);shareSaveDialog.value.folders=(res.files||[]).filter(item=>item.kind==='drive#folder')}catch(e){error.value=e.message||String(e)}finally{shareSaveDialog.value.loading=false}}
 async function navigateSaveDialog(folder){shareSaveDialog.value.targetId=folder.id;shareSaveDialog.value.targetName=folder.name;shareSaveDialog.value.path.push(folder);await loadSaveDialogFolders(folder.id)}

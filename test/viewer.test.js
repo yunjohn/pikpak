@@ -58,25 +58,62 @@ describe('image viewer',()=>{
     await new Promise(resolve=>setTimeout(resolve,0));
     expect(dom.window.document.querySelector('select[title="播放速度"]')).not.toBeNull();
     expect([...dom.window.document.querySelector('select[title="播放速度"]').options].map(option=>option.textContent)).toEqual(['0.5×','0.75×','1×','1.25×','1.5×','2×']);
-    expect([...dom.window.document.querySelectorAll('.video-tools > button')].map(button=>button.textContent)).toEqual(['字幕','画中画','截图']);
-    dom.window.document.querySelector('.video-tools button').click();
+    expect([...dom.window.document.querySelectorAll('.video-tools > button')].filter(button=>!button.hidden).map(button=>button.textContent)).toEqual(['字幕','画中画','截图']);
+    dom.window.document.querySelector('.video-tools button:not([hidden])').click();
     await new Promise(resolve=>setTimeout(resolve,0));
     expect(dom.window.document.querySelector('track').src).toBe('blob:subtitle');
-    expect(dom.window.document.querySelectorAll('.video-tools > button')[2].click());
+    [...dom.window.document.querySelectorAll('.video-tools > button')].find(button=>button.textContent==='截图').click();
     await new Promise(resolve=>setTimeout(resolve,0));
     expect(captured).toBe(true);
 
     // Test delay controls
     const delayButtons = [...dom.window.document.querySelectorAll('.subtitle-delay-tools button')];
+    const subtitleButton = [...dom.window.document.querySelectorAll('.video-tools > button')].find(button=>button.textContent.startsWith('字幕'));
     expect(delayButtons.map(b => b.textContent)).toEqual(['-0.5s', '+0.5s', '重置 0s']);
     delayButtons[1].click(); // +0.5s
-    expect(dom.window.document.querySelector('.video-tools button').textContent).toContain('+0.5s');
+    expect(subtitleButton.textContent).toContain('+0.5s');
     delayButtons[0].click(); // -0.5s (back to 0s)
     delayButtons[0].click(); // -0.5s (now -0.5s)
-    expect(dom.window.document.querySelector('.video-tools button').textContent).toContain('-0.5s');
+    expect(subtitleButton.textContent).toContain('-0.5s');
     delayButtons[2].click(); // reset 0s
-    expect(dom.window.document.querySelector('.video-tools button').textContent).toBe('字幕：中文.srt');
+    expect(subtitleButton.textContent).toBe('字幕：中文.srt');
 
+    dom.window.close();
+  });
+
+  it('lazy-loads adjacent videos and supports optional auto play',async()=>{
+    const dom=new JSDOM('<main id="viewer"></main>',{url:'https://local.test/viewer.html?token=playlist',runScripts:'outside-only'});
+    dom.window.TextDecoder=TextDecoder;
+    dom.window.HTMLMediaElement.prototype.pause=()=>{};
+    dom.window.HTMLMediaElement.prototype.load=()=>{};
+    dom.window.HTMLMediaElement.prototype.play=()=>Promise.resolve();
+    dom.window.localStorage.setItem('pikpak-viewer-video-preferences-v1',JSON.stringify({autoNext:true}));
+    const resolved=[];
+    dom.window.viewerProgress={get:async()=>({time:0,duration:0}),set:async()=>true};
+    dom.window.viewerPayload={
+      get:async()=>({url:'https://cdn.test/one.mp4',name:'01.mp4',kind:'video',fileId:'drive:one',sources:[{url:'https://cdn.test/one.mp4',label:'720P'}],playlist:[{fileId:'drive:one',name:'01.mp4',url:'https://cdn.test/one.mp4',sources:[{url:'https://cdn.test/one.mp4',label:'720P'}]},{fileId:'drive:two',name:'02.mp4',url:'',sources:[]}]}),
+      resolveMedia:async fileId=>{resolved.push(fileId);return {url:'https://cdn.test/two.mp4',sources:[{url:'https://cdn.test/two.mp4',label:'1080P'}]}}
+    };
+    dom.window.eval(fs.readFileSync(new URL('../electron/viewer.js',import.meta.url),'utf8'));
+    await new Promise(resolve=>setTimeout(resolve,0));
+    const video=dom.window.document.querySelector('video'),next=[...dom.window.document.querySelectorAll('.video-tools button')].find(button=>button.textContent==='下一集');
+    expect(next.disabled).toBe(false);
+    video.dispatchEvent(new dom.window.Event('ended'));
+    await new Promise(resolve=>setTimeout(resolve,0));
+    expect(resolved).toEqual(['drive:two']);
+    expect(dom.window.document.querySelector('video').src).toBe('https://cdn.test/two.mp4');
+    expect(dom.window.document.title).toBe('02.mp4');
+    expect(next.disabled).toBe(true);
+    const auto=[...dom.window.document.querySelectorAll('.video-tools button')].find(button=>button.textContent.startsWith('自动连播'));
+    expect(auto.textContent).toBe('自动连播：开');
+    auto.click();
+    expect(auto.textContent).toBe('自动连播：关');
+    dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'PageUp'}));
+    await new Promise(resolve=>setTimeout(resolve,0));
+    expect(dom.window.document.title).toBe('01.mp4');
+    video.dispatchEvent(new dom.window.Event('ended'));
+    await new Promise(resolve=>setTimeout(resolve,0));
+    expect(dom.window.document.title).toBe('01.mp4');
     dom.window.close();
   });
 

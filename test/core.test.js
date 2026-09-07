@@ -27,6 +27,7 @@ describe('desktop core', () => {
   it('extracts refresh credentials only from bounded token-shaped storage values', () => {
     const found=extractCredentialsFromStorage({theme:'dark',authToken:JSON.stringify({refresh_token:'refresh-token-value-1234567890',access_token:'access-token-value',client_id:'web-client'})});
     expect(found).toEqual({refreshToken:'refresh-token-value-1234567890',accessToken:'access-token-value',clientId:'web-client',storageKey:'authToken'});
+    expect(extractCredentialsFromStorage({session:JSON.stringify({access_token:'access-token-value-1234567890'})})).toMatchObject({accessToken:'access-token-value-1234567890'});
     expect(extractCredentialsFromStorage({authToken:'not-json-refresh_token'})).toBeNull();
     expect(extractCredentialsFromStorage({authToken:'x'.repeat(100001)})).toBeNull();
   });

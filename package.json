@@ -1,6 +1,6 @@
 {
   "name": "pikpak-desktop-client",
-  "version": "0.51.0",
+  "version": "0.52.0",
   "description": "Independent PikPak desktop file browser and media client",
   "author": "PikPak Desktop contributors",
   "private": true,

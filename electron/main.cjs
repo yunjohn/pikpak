@@ -16,6 +16,7 @@ let proactiveRefreshTimer = null;
 let programmaticRefreshPromise = null;
 let loginWindow = null;
 let loginCompletion = null;
+let loginCredentialTimer = null;
 let authRefreshWindow = null;
 let authRefreshPromise = null;
 const authRefreshWaiters = new Set();
@@ -113,15 +114,18 @@ async function captureStoredCredentials(webContents) {
   try {
     const currentUrl = new URL(webContents.getURL());
     if (currentUrl.protocol !== 'https:' || (currentUrl.hostname !== 'mypikpak.com' && !currentUrl.hostname.endsWith('.mypikpak.com'))) return;
-    const entries = await webContents.executeJavaScript(`(()=>{try{const found={};for(let i=0;i<localStorage.length&&i<200;i++){const key=localStorage.key(i)||'';const value=localStorage.getItem(key)||'';if(value.length>=20&&value.length<=100000&&(/[Tt]oken/.test(key)||value.includes('refresh_token')))found[key]=value}return found}catch{return {}}})()`, true);
+    const entries = await webContents.executeJavaScript(`(()=>{try{const found={};for(let i=0;i<localStorage.length&&i<200;i++){const key=localStorage.key(i)||'';const value=localStorage.getItem(key)||'';if(value.length>=20&&value.length<=100000&&(/[Tt]oken/.test(key)||value.includes('refresh_token')||value.includes('access_token')))found[key]=value}return found}catch{return {}}})()`, true);
     const found = extractCredentialsFromStorage(entries || {});
-    if (found?.refreshToken) {
+    if (found?.refreshToken || found?.accessToken) {
       const current = readAccount();
-      writeAccount({ ...current, refreshToken: found.refreshToken, clientId: found.clientId || current.clientId, updatedAt: Date.now() });
-      logger.info('auth', 'Refresh token captured from page storage', { storageKey: found.storageKey });
+      const accessToken=found.accessToken.length>20?found.accessToken:current.accessToken;
+      writeAccount({ ...current, accessToken, refreshToken: found.refreshToken || current.refreshToken, clientId: found.clientId || current.clientId, source:current.source||'web-login', updatedAt: Date.now() });
+      logger.info('auth', 'Credentials captured from page storage', { storageKey: found.storageKey, hasAccessToken:Boolean(found.accessToken), hasRefreshToken:Boolean(found.refreshToken) });
+      if(found.accessToken.length>20){for(const waiter of authRefreshWaiters)if(found.accessToken!==waiter.previous){authRefreshWaiters.delete(waiter);waiter.resolve(true)}if(loginCompletion){const done=loginCompletion;loginCompletion=null;done(accountStatus());setTimeout(()=>{if(loginWindow&&!loginWindow.isDestroyed())loginWindow.close()},300)}}
     }
   } catch {}
 }
+function startLoginCredentialCapture(win){if(loginCredentialTimer)clearInterval(loginCredentialTimer);const capture=()=>{if(!win||win.isDestroyed()){clearInterval(loginCredentialTimer);loginCredentialTimer=null;return}captureStoredCredentials(win.webContents)};setTimeout(capture,500);loginCredentialTimer=setInterval(capture,1500)}
 function parseUploadedTokenRequest(uploadData) {
   try {
     const raw = (Array.isArray(uploadData) ? uploadData : []).map(entry => {
@@ -238,8 +242,8 @@ function openLoginWindow(){
   if(loginWindow&&!loginWindow.isDestroyed()){loginWindow.focus();return}
   loginWindow=new BrowserWindow({width:1080,height:760,minWidth:760,minHeight:560,title:'登录 PikPak',autoHideMenuBar:true,webPreferences:{session:session.fromPartition('persist:pikpak-login'),contextIsolation:true,nodeIntegration:false}});
   loginWindow.loadURL('https://mypikpak.com/drive/all');
-  loginWindow.webContents.on('did-finish-load',()=>{setTimeout(()=>captureStoredCredentials(loginWindow?.webContents),2500)});
-  loginWindow.on('closed',()=>{loginWindow=null;if(loginCompletion){const done=loginCompletion;loginCompletion=null;done(accountStatus())}});
+  loginWindow.webContents.on('did-finish-load',()=>startLoginCredentialCapture(loginWindow));
+  loginWindow.on('closed',()=>{if(loginCredentialTimer){clearInterval(loginCredentialTimer);loginCredentialTimer=null}loginWindow=null;if(loginCompletion){const done=loginCompletion;loginCompletion=null;done(accountStatus())}});
 }
 
 function safeFilename(value) {
@@ -633,7 +637,7 @@ ipcMain.handle('upload:cancel',(_,id)=>{id=String(id||'');const queued=uploadQue
 ipcMain.handle('upload:list',()=>uploadHistory);
 ipcMain.handle('upload:remove',(_,id)=>{uploadHistory=uploadHistory.filter(item=>item.id!==String(id||''));clearTimeout(uploadSaveTimer);uploadSaveTimer=setTimeout(flushUploadHistory,50);return uploadHistory});
 ipcMain.handle('upload:clear',()=>{uploadHistory=uploadHistory.filter(item=>['queued','hashing','uploading'].includes(item.state));clearTimeout(uploadSaveTimer);uploadSaveTimer=setTimeout(flushUploadHistory,50);return uploadHistory});
-ipcMain.handle('viewer:open',async(_,{url,name,fileId='',mimeType,sources=[],items=[],subtitles=[]})=>{
+ipcMain.handle('viewer:open',async(_,{url,name,fileId='',mimeType,sources=[],items=[],subtitles=[],playlist=[]})=>{
   const target=String(url||'');if(!/^https?:\/\//i.test(target))throw new Error('当前文件没有可用的查看地址');
   const kind=previewKind(name,mimeType);
   if(!kind)throw new Error('此文件类型暂不支持预览，请使用“下载到本机”');
@@ -644,7 +648,8 @@ ipcMain.handle('viewer:open',async(_,{url,name,fileId='',mimeType,sources=[],ite
   const safeSources=(Array.isArray(sources)?sources:[]).slice(0,10).map(source=>({url:String(source?.url||''),label:String(source?.label||'清晰度').slice(0,30)})).filter(source=>/^https?:\/\//i.test(source.url));
   const safeItems=(Array.isArray(items)?items:[]).slice(0,60).map(item=>({id:String(item?.id||''),name:String(item?.name||'图片').slice(0,300),url:String(item?.url||'')})).filter(item=>/^https?:\/\//i.test(item.url));
   const safeSubtitles=(Array.isArray(subtitles)?subtitles:[]).slice(0,15).map(sub=>({id:String(sub?.id||''),name:String(sub?.name||'字幕').slice(0,120),url:String(sub?.url||'')})).filter(sub=>/^https?:\/\//i.test(sub.url));
-  const token=crypto.randomUUID(),viewerWebContentsId=win.webContents.id;viewerPayloads.set(token,{webContentsId:viewerWebContentsId,payload:{url:target,name:String(name||'文件查看'),kind,fileId,sources:safeSources,items:safeItems,subtitles:safeSubtitles}});win.on('closed',()=>{playingViewers.delete(viewerWebContentsId);updatePlaybackPowerBlocker();viewerWindows.delete(win);viewerPayloads.delete(token)});
+  const safePlaylist=(Array.isArray(playlist)?playlist:[]).slice(0,101).map(entry=>({fileId:String(entry?.fileId||''),name:String(entry?.name||'视频').slice(0,300),url:/^https?:\/\//i.test(String(entry?.url||''))?String(entry.url):'',sources:(Array.isArray(entry?.sources)?entry.sources:[]).slice(0,10).map(source=>({url:String(source?.url||''),label:String(source?.label||'清晰度').slice(0,30)})).filter(source=>/^https?:\/\//i.test(source.url))})).filter(entry=>entry.fileId&&(entry.fileId.startsWith('drive:')||entry.fileId.startsWith('share:')));
+  const token=crypto.randomUUID(),viewerWebContentsId=win.webContents.id;viewerPayloads.set(token,{webContentsId:viewerWebContentsId,payload:{url:target,name:String(name||'文件查看'),kind,fileId,sources:safeSources,items:safeItems,subtitles:safeSubtitles,playlist:safePlaylist}});win.on('closed',()=>{playingViewers.delete(viewerWebContentsId);updatePlaybackPowerBlocker();viewerWindows.delete(win);viewerPayloads.delete(token)});
   await win.loadFile(path.join(__dirname,'viewer.html'),{query:{token}});return true;
 });
 ipcMain.handle('app:clear-cache',async()=>{
@@ -656,10 +661,19 @@ ipcMain.handle('app:clear-cache',async()=>{
 });
 ipcMain.handle('viewer:payload-get',(event,token)=>{const entry=viewerPayloads.get(String(token||''));if(!entry||entry.webContentsId!==event.sender.id)throw new Error('查看会话已失效，请重新打开文件');return entry.payload});
 function viewerFor(event){const win=BrowserWindow.fromWebContents(event.sender);if(!win||!viewerWindows.has(win))throw new Error('无效的查看窗口');return win}
+function viewerEntryFor(event){viewerFor(event);const entry=[...viewerPayloads.values()].find(value=>value.webContentsId===event.sender.id);if(!entry)throw new Error('无法识别当前媒体文件');return entry}
+async function resolveViewerMedia(progressId){
+  let detail;
+  if(progressId.startsWith('drive:')){const id=progressId.slice(6),account=readAccount();if(!account.accessToken)throw new Error('登录状态已过期');detail=await apiRequest(`https://api-drive.mypikpak.com/drive/v1/files/${encodeURIComponent(id)}?thumbnail_size=SIZE_LARGE`,{action:'GET:/drive/v1/files/{id}',authorization:account.accessToken})}
+  else if(progressId.startsWith('share:')){const parts=progressId.split(':'),shareId=parts[1],id=parts.slice(2).join(':');const query=new URLSearchParams({share_id:shareId,file_id:id,thumbnail_size:'SIZE_LARGE'});detail=await apiRequest(`https://api-drive.mypikpak.com/drive/v1/share/file_info?${query}`,{action:'GET:/drive/v1/share/file_info'})}
+  else throw new Error('当前媒体不支持刷新地址');
+  const file=detail?.file||detail?.data?.file||detail,sources=playbackSourcesFromFile(file);if(!sources.length)throw new Error('没有获取到可用的播放地址');return {url:sources[0].url,sources:sources.slice(0,10)};
+}
 ipcMain.handle('viewer:playing',(event,isPlaying)=>{viewerFor(event);if(isPlaying)playingViewers.add(event.sender.id);else playingViewers.delete(event.sender.id);updatePlaybackPowerBlocker();return playingViewers.size});
 ipcMain.handle('viewer:subtitle-choose',async event=>{const win=viewerFor(event),picked=await dialog.showOpenDialog(win,{title:'选择字幕文件',properties:['openFile'],filters:[{name:'字幕文件',extensions:['srt','vtt','ass','ssa']}]});if(picked.canceled||!picked.filePaths[0])return null;const filePath=picked.filePaths[0],stat=await fs.promises.stat(filePath);if(stat.size>10*1024*1024)throw new Error('字幕文件不能超过 10 MB');return {name:path.basename(filePath),text:decodeSubtitleBytes(await fs.promises.readFile(filePath))}});
 ipcMain.handle('viewer:subtitle-decode',(event,input)=>{viewerFor(event);const bytes=Buffer.from(input||[]);if(bytes.length>10*1024*1024)throw new Error('字幕文件不能超过 10 MB');return decodeSubtitleBytes(bytes)});
-ipcMain.handle('viewer:media-refresh',async event=>{viewerFor(event);const entry=[...viewerPayloads.values()].find(value=>value.webContentsId===event.sender.id),progressId=String(entry?.payload?.fileId||'');if(!entry||!progressId)throw new Error('无法识别当前媒体文件');let detail;if(progressId.startsWith('drive:')){const id=progressId.slice(6),account=readAccount();if(!account.accessToken)throw new Error('登录状态已过期');detail=await apiRequest(`https://api-drive.mypikpak.com/drive/v1/files/${encodeURIComponent(id)}?thumbnail_size=SIZE_LARGE`,{action:'GET:/drive/v1/files/{id}',authorization:account.accessToken})}else if(progressId.startsWith('share:')){const parts=progressId.split(':'),shareId=parts[1],id=parts.slice(2).join(':');const query=new URLSearchParams({share_id:shareId,file_id:id,thumbnail_size:'SIZE_LARGE'});detail=await apiRequest(`https://api-drive.mypikpak.com/drive/v1/share/file_info?${query}`,{action:'GET:/drive/v1/share/file_info'})}else throw new Error('当前媒体不支持刷新地址');const file=detail?.file||detail?.data?.file||detail,sources=playbackSourcesFromFile(file);if(!sources.length)throw new Error('没有获取到新的播放地址');entry.payload.url=sources[0].url;entry.payload.sources=sources.slice(0,10);return {url:entry.payload.url,sources:entry.payload.sources}});
+ipcMain.handle('viewer:media-resolve',async(event,requestedFileId)=>{const entry=viewerEntryFor(event),progressId=String(requestedFileId||''),playlistEntry=(entry.payload.playlist||[]).find(item=>item.fileId===progressId);if(!playlistEntry)throw new Error('该视频不在当前播放列表中');if(playlistEntry.sources?.length)return {url:playlistEntry.url||playlistEntry.sources[0].url,sources:playlistEntry.sources};const result=await resolveViewerMedia(progressId);playlistEntry.url=result.url;playlistEntry.sources=result.sources;return result});
+ipcMain.handle('viewer:media-refresh',async(event,requestedFileId='')=>{const entry=viewerEntryFor(event),progressId=String(requestedFileId||entry.payload.fileId||'');if(progressId!==entry.payload.fileId&&!(entry.payload.playlist||[]).some(item=>item.fileId===progressId))throw new Error('该视频不在当前播放列表中');const result=await resolveViewerMedia(progressId),playlistEntry=(entry.payload.playlist||[]).find(item=>item.fileId===progressId);if(playlistEntry){playlistEntry.url=result.url;playlistEntry.sources=result.sources}if(progressId===entry.payload.fileId){entry.payload.url=result.url;entry.payload.sources=result.sources}return result});
 ipcMain.handle('viewer:capture',async(event,payload={})=>{const win=viewerFor(event),rect=payload.rect||{},width=Math.max(1,Math.floor(Number(rect.width)||1)),height=Math.max(1,Math.floor(Number(rect.height)||1)),x=Math.max(0,Math.floor(Number(rect.x)||0)),y=Math.max(0,Math.floor(Number(rect.y)||0));if(width>10000||height>10000)throw new Error('截图区域无效');const image=await win.webContents.capturePage({x,y,width,height}),base=String(payload.name||'视频').replace(/[<>:"/\\|?*\x00-\x1f]/g,'_').slice(0,120),stamp=new Date().toISOString().replace(/[:.]/g,'-'),saved=await dialog.showSaveDialog(win,{title:'保存视频截图',defaultPath:`${base}-${stamp}.png`,filters:[{name:'PNG 图片',extensions:['png']}]});if(saved.canceled||!saved.filePath)return '';await fs.promises.writeFile(saved.filePath,image.toPNG());return saved.filePath});
 ipcMain.handle('viewer:progress-get',(_,fileId)=>{const id=String(fileId||'');return id&&playbackHistory[id]?playbackHistory[id]:{time:0,duration:0}});
 ipcMain.handle('viewer:progress-set',(_,payload)=>{const id=String(payload?.fileId||''),time=Number(payload?.time||0),duration=Number(payload?.duration||0);if(!id||!Number.isFinite(time)||time<0||!Number.isFinite(duration)||duration<0)return false;if(time===0||duration-time<8)delete playbackHistory[id];else playbackHistory[id]={time:Math.min(time,duration||time),duration,updatedAt:Date.now()};clearTimeout(playbackSaveTimer);playbackSaveTimer=setTimeout(flushPlaybackHistory,500);return true});

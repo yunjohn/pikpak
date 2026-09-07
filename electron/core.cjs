@@ -229,7 +229,7 @@ function accountForStorage(account = {}, previous = {}, fallbackDeviceId = '', n
 function extractCredentialsFromStorage(entries = {}) {
   for (const [key, raw] of Object.entries(entries || {})) {
     if (typeof raw !== 'string' || raw.length < 20 || raw.length > 100000) continue;
-    if (!/[Tt]oken/.test(key) && !raw.includes('refresh_token')) continue;
+    if (!/[Tt]oken/.test(key) && !raw.includes('refresh_token') && !raw.includes('access_token')) continue;
     let value = raw;
     try {
       value = JSON.parse(raw);
@@ -239,7 +239,7 @@ function extractCredentialsFromStorage(entries = {}) {
     if (!source) continue;
     const refreshToken = String(source.refresh_token || source.refreshToken || '');
     const accessToken = String(source.access_token || source.accessToken || '');
-    if (!refreshToken) continue;
+    if (!refreshToken && !accessToken) continue;
     return {
       refreshToken,
       accessToken,
