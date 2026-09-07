@@ -21,8 +21,21 @@ describe('image viewer',()=>{
     expect(dom.window.document.querySelector('img').src).toBe('https://example.test/one.jpg');
     dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'+'}));
     expect(dom.window.document.querySelector('img').style.transform).toContain('scale(1.2)');
+    expect(dom.window.document.querySelector('.image-zoom-badge').textContent).toBe('120%');
     dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'r'}));
     expect(dom.window.document.querySelector('img').style.transform).toContain('rotate(90deg)');
+    dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'l'}));
+    expect(dom.window.document.querySelector('img').style.transform).toContain('rotate(0deg)');
+    // Test mouse drag pan
+    const stage = dom.window.document.querySelector('.image-stage');
+    stage.dispatchEvent(new dom.window.MouseEvent('mousedown',{button:0,clientX:100,clientY:100}));
+    dom.window.dispatchEvent(new dom.window.MouseEvent('mousemove',{clientX:150,clientY:130}));
+    dom.window.dispatchEvent(new dom.window.MouseEvent('mouseup',{}));
+    expect(dom.window.document.querySelector('img').style.transform).toContain('translate(50px, 30px)');
+    // Test 0 to fit
+    dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'0'}));
+    expect(dom.window.document.querySelector('img').style.transform).toBe('translate(0px, 0px) scale(1) rotate(0deg)');
+    expect(dom.window.document.querySelector('.image-zoom-badge').textContent).toBe('100%');
     dom.window.document.querySelector('[title^="开始幻灯片"]').click();
     expect(dom.window.document.querySelector('.image-tools').textContent).toContain('⏸');
     dom.window.close();
