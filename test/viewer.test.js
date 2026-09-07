@@ -138,9 +138,10 @@ describe('image viewer',()=>{
     };
     dom.window.URL.createObjectURL=()=> 'blob:online-sub';
     dom.window.URL.revokeObjectURL=()=>{};
+    const assText=`[Script Info]\nTitle: Test ASS\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:01:23.45,0:01:26.78,Default,,0,0,0,,{\\pos(192,200)}测试字幕`;
     dom.window.fetch = async (url) => ({
       ok: true,
-      text: async () => `[Script Info]\nTitle: Test ASS\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:01:23.45,0:01:26.78,Default,,0,0,0,,{\\pos(192,200)}测试字幕`
+      arrayBuffer: async () => new TextEncoder().encode(assText).buffer
     });
     dom.window.viewerPayload={
       get:async()=>({
@@ -151,7 +152,8 @@ describe('image viewer',()=>{
         sources:[],
         items:[],
         subtitles:[{ id:'sub1', name:'电影.ass', url:'https://sub.test/movie.ass' }]
-      })
+      }),
+      decodeSubtitle:async bytes=>new TextDecoder().decode(bytes)
     };
     dom.window.eval(fs.readFileSync(new URL('../electron/viewer.js',import.meta.url),'utf8'));
     await new Promise(resolve=>setTimeout(resolve,50));

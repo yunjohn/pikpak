@@ -2,9 +2,15 @@ import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
-const { parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, matchSubtitles, detectConflicts, generateUniqueName, isValidDeviceId, accountForStorage } = require('../electron/core.cjs');
+const { parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, matchSubtitles, detectConflicts, generateUniqueName, isValidDeviceId, accountForStorage, decodeSubtitleBytes } = require('../electron/core.cjs');
 
 describe('desktop core', () => {
+  it('decodes UTF-8, UTF-16 and GB18030 subtitle files', () => {
+    expect(decodeSubtitleBytes(Buffer.from('\ufeff中文字幕','utf8'))).toBe('中文字幕');
+    expect(decodeSubtitleBytes(Buffer.concat([Buffer.from([0xff,0xfe]),Buffer.from('中文字幕','utf16le')]))).toBe('中文字幕');
+    expect(decodeSubtitleBytes(Buffer.from([0xd6,0xd0,0xce,0xc4]))).toBe('中文');
+  });
+
   it('keeps a stable valid device id with encrypted account data', () => {
     const saved=accountForStorage({accessToken:'next-token'},{deviceId:'saved-device-id-1234',source:'web-login'},'random-device-id-5678',123);
     expect(saved).toEqual({accessToken:'next-token',deviceId:'saved-device-id-1234',source:'web-login',updatedAt:123});

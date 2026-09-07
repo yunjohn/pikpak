@@ -10,5 +10,6 @@ contextBridge.exposeInMainWorld('viewerPlayback', {
 contextBridge.exposeInMainWorld('viewerPayload', {
   get: token => ipcRenderer.invoke('viewer:payload-get', token),
   chooseSubtitle: () => ipcRenderer.invoke('viewer:subtitle-choose'),
+  decodeSubtitle: bytes => ipcRenderer.invoke('viewer:subtitle-decode', bytes),
   capture: payload => ipcRenderer.invoke('viewer:capture', payload)
 });
