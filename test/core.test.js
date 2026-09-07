@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
-const { parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, matchSubtitles, detectConflicts, generateUniqueName, isValidDeviceId, accountForStorage, decodeSubtitleBytes, playbackSourcesFromFile } = require('../electron/core.cjs');
+const { CLIENT_ID, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, matchSubtitles, detectConflicts, generateUniqueName, isValidDeviceId, accountForStorage, extractCredentialsFromStorage, buildTokenRefreshBody, decodeSubtitleBytes, playbackSourcesFromFile } = require('../electron/core.cjs');
 
 describe('desktop core', () => {
   it('normalizes refreshed playback sources and removes duplicate URLs', () => {
@@ -18,10 +18,23 @@ describe('desktop core', () => {
   });
 
   it('keeps a stable valid device id with encrypted account data', () => {
-    const saved=accountForStorage({accessToken:'next-token'},{deviceId:'saved-device-id-1234',source:'web-login'},'random-device-id-5678',123);
-    expect(saved).toEqual({accessToken:'next-token',deviceId:'saved-device-id-1234',source:'web-login',updatedAt:123});
+    const saved=accountForStorage({accessToken:'next-token'},{refreshToken:'refresh-token',clientId:'client-id',tokenExpiresAt:999,deviceId:'saved-device-id-1234',source:'web-login'},'random-device-id-5678',123);
+    expect(saved).toEqual({accessToken:'next-token',refreshToken:'refresh-token',clientId:'client-id',tokenExpiresAt:999,deviceId:'saved-device-id-1234',source:'web-login',updatedAt:123});
     expect(isValidDeviceId(saved.deviceId)).toBe(true);
     expect(accountForStorage({accessToken:'token',deviceId:'bad id'}, {}, 'also bad', 456).deviceId).toBe('');
+  });
+
+  it('extracts refresh credentials only from bounded token-shaped storage values', () => {
+    const found=extractCredentialsFromStorage({theme:'dark',authToken:JSON.stringify({refresh_token:'refresh-token-value-1234567890',access_token:'access-token-value',client_id:'web-client'})});
+    expect(found).toEqual({refreshToken:'refresh-token-value-1234567890',accessToken:'access-token-value',clientId:'web-client',storageKey:'authToken'});
+    expect(extractCredentialsFromStorage({authToken:'not-json-refresh_token'})).toBeNull();
+    expect(extractCredentialsFromStorage({authToken:'x'.repeat(100001)})).toBeNull();
+  });
+
+  it('builds a refresh-token request with the official client fallback', () => {
+    expect(buildTokenRefreshBody({refreshToken:' refresh-token '})).toEqual({client_id:CLIENT_ID,grant_type:'refresh_token',refresh_token:'refresh-token',client_secret:''});
+    expect(buildTokenRefreshBody({refreshToken:'refresh-token',clientId:' custom-client '})).toMatchObject({client_id:'custom-client'});
+    expect(()=>buildTokenRefreshBody({})).toThrow(/refresh_token/);
   });
 
   it('detects name conflicts case-insensitively and separates non-conflicts', () => {

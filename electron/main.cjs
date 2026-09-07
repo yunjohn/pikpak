@@ -2,7 +2,7 @@ const { app, BrowserWindow, clipboard, dialog, ipcMain, powerSaveBlocker, safeSt
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
-const { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, buildInterruptedDownloadOptions, isValidDeviceId, accountForStorage, decodeSubtitleBytes, playbackSourcesFromFile } = require('./core.cjs');
+const { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, buildInterruptedDownloadOptions, isValidDeviceId, accountForStorage, extractCredentialsFromStorage, buildTokenRefreshBody, decodeSubtitleBytes, playbackSourcesFromFile } = require('./core.cjs');
 const { logger } = require('./logger.cjs');
 
 process.on('uncaughtException', err => logger.error('process', 'Uncaught exception', err?.stack || err));
@@ -12,6 +12,8 @@ const isDev = !app.isPackaged && process.env.NODE_ENV !== 'production' && !proce
 
 let deviceId = crypto.randomBytes(16).toString('hex');
 let captcha = { token: '', expiresAt: 0, action: '' };
+let proactiveRefreshTimer = null;
+let programmaticRefreshPromise = null;
 let loginWindow = null;
 let loginCompletion = null;
 let authRefreshWindow = null;
@@ -59,7 +61,91 @@ function writeAccount(account) {
   fs.mkdirSync(path.dirname(configPath()), { recursive: true });
   fs.writeFileSync(configPath(), data);
 }
-function clearAccount() { try { fs.unlinkSync(configPath()); } catch {} }
+function clearAccount() {
+  try { fs.unlinkSync(configPath()); } catch {}
+  if (proactiveRefreshTimer) { clearTimeout(proactiveRefreshTimer); proactiveRefreshTimer = null; }
+}
+function scheduleProactiveRefresh(delayMs) {
+  const delay = Math.max(30000, Number(delayMs) || 0);
+  if (proactiveRefreshTimer) clearTimeout(proactiveRefreshTimer);
+  proactiveRefreshTimer = setTimeout(() => { proactiveRefreshTimer = null; refreshAccessToken().catch(()=>{}); }, delay);
+  logger.info('auth', 'Proactive token refresh scheduled', { inMinutes: Math.round(delay / 60000) });
+}
+function rememberTokenExpiry(expiresIn) {
+  const seconds = Number(expiresIn);
+  if (!Number.isFinite(seconds) || seconds <= 0) return;
+  const tokenExpiresAt = Date.now() + seconds * 1000;
+  const current = readAccount();
+  writeAccount({ ...current, tokenExpiresAt });
+  scheduleProactiveRefresh(Math.max(60000, seconds * 1000 - 5 * 60 * 1000));
+}
+function restoreTokenRefreshSchedule() {
+  const expiresAt = Number(readAccount().tokenExpiresAt || 0);
+  if (!expiresAt) return;
+  scheduleProactiveRefresh(Math.max(30000, expiresAt - Date.now() - 5 * 60 * 1000));
+}
+async function performAccessTokenRefresh() {
+  const account = readAccount();
+  if (!account.refreshToken) return false;
+  try {
+    const body = buildTokenRefreshBody({ refreshToken: account.refreshToken, clientId: account.clientId });
+    const response = await fetch('https://user.mypikpak.com/v1/auth/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-client-id': body.client_id, 'x-device-id': deviceId },
+      body: JSON.stringify(body)
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.access_token) {
+      logger.warn('auth', 'Programmatic token refresh rejected', { status: response.status, error: data.error_description || data.error });
+      return false;
+    }
+    writeAccount({ accessToken: String(data.access_token), refreshToken: String(data.refresh_token || account.refreshToken), clientId: body.client_id, source: 'refresh-token', updatedAt: Date.now() });
+    rememberTokenExpiry(data.expires_in);
+    logger.info('auth', 'Access token refreshed programmatically', { rotated: Boolean(data.refresh_token) });
+    return true;
+  } catch (error) {
+    logger.warn('auth', 'Programmatic token refresh failed', error?.message || String(error));
+    return false;
+  }
+}
+async function captureStoredCredentials(webContents) {
+  if (!webContents || webContents.isDestroyed()) return;
+  try {
+    const currentUrl = new URL(webContents.getURL());
+    if (currentUrl.protocol !== 'https:' || (currentUrl.hostname !== 'mypikpak.com' && !currentUrl.hostname.endsWith('.mypikpak.com'))) return;
+    const entries = await webContents.executeJavaScript(`(()=>{try{const found={};for(let i=0;i<localStorage.length&&i<200;i++){const key=localStorage.key(i)||'';const value=localStorage.getItem(key)||'';if(value.length>=20&&value.length<=100000&&(/[Tt]oken/.test(key)||value.includes('refresh_token')))found[key]=value}return found}catch{return {}}})()`, true);
+    const found = extractCredentialsFromStorage(entries || {});
+    if (found?.refreshToken) {
+      const current = readAccount();
+      writeAccount({ ...current, refreshToken: found.refreshToken, clientId: found.clientId || current.clientId, updatedAt: Date.now() });
+      logger.info('auth', 'Refresh token captured from page storage', { storageKey: found.storageKey });
+    }
+  } catch {}
+}
+function parseUploadedTokenRequest(uploadData) {
+  try {
+    const raw = (Array.isArray(uploadData) ? uploadData : []).map(entry => {
+      const bytes = entry?.bytes;
+      if (Buffer.isBuffer(bytes) && bytes.length <= 256 * 1024) return bytes.toString('utf8');
+      if (ArrayBuffer.isView(bytes) && bytes.byteLength <= 256 * 1024) return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('utf8');
+      return '';
+    }).filter(Boolean).join('&');
+    if (!raw) return null;
+    let value = null;
+    try { value = JSON.parse(raw) } catch {}
+    if (!value || typeof value !== 'object') {
+      value = {};
+      for (const [key, val] of new URLSearchParams(raw)) value[key] = val;
+    }
+    const refreshToken = String(value.refresh_token || value.refreshToken || '');
+    return refreshToken ? { refreshToken, clientId: String(value.client_id || value.clientId || '') } : null;
+  } catch { return null }
+}
+function refreshAccessToken() {
+  if (programmaticRefreshPromise) return programmaticRefreshPromise;
+  programmaticRefreshPromise = performAccessTokenRefresh().finally(() => { programmaticRefreshPromise = null; });
+  return programmaticRefreshPromise;
+}
 function restoreDeviceId(){const saved=String(readAccount().deviceId||'');if(isValidDeviceId(saved))deviceId=saved}
 function rotateDeviceId(){deviceId=crypto.randomBytes(16).toString('hex');captcha={token:'',expiresAt:0,action:''}}
 async function getCaptcha(action) {
@@ -84,8 +170,10 @@ async function apiRequest(url, { action, method='GET', body, authorization='', r
   if (!response.ok) {
     logger.warn('api', `API request failed (${response.status})`, { path: new URL(url).pathname, status: response.status, error: data.error_description || data.error });
     if(authorization&&retryAuth&&(response.status===401||response.status===403)){
-      logger.info('auth', 'Attempting auth refresh for expired credentials');
-      const refreshed=await refreshOfficialAuth();
+      logger.warn('auth', 'Credentials rejected, attempting refresh', { status: response.status });
+      let refreshed=false;
+      if(readAccount().refreshToken)refreshed=await refreshAccessToken();
+      if(!refreshed){logger.info('auth','Falling back to hidden-window refresh');refreshed=await refreshOfficialAuth()}
       if(refreshed){const next=readAccount().accessToken;return apiRequest(url,{action,method,body,authorization:next,retryAuth:false})}
       clearAccount();if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('account:expired');
       logger.warn('auth', 'Auth refresh failed, session expired');
@@ -118,11 +206,19 @@ function installPikPakSessionCapture() {
     if(capturedDevice)deviceId=capturedDevice;
     if(capturedCaptcha)captcha={token:capturedCaptcha,action:'',expiresAt:Date.now()+240000};
     if(auth.length>20){
-      const accessToken=auth.replace(/^Bearer\s+/i,'');writeAccount({accessToken,source:'web-login',updatedAt:Date.now()});
+      const accessToken=auth.replace(/^Bearer\s+/i,'');
+      writeAccount({accessToken,source:'web-login',updatedAt:Date.now()});
       for(const waiter of authRefreshWaiters)if(accessToken!==waiter.previous){authRefreshWaiters.delete(waiter);waiter.resolve(true)}
       if(loginCompletion){const done=loginCompletion;loginCompletion=null;done(accountStatus());setTimeout(()=>{if(loginWindow&&!loginWindow.isDestroyed())loginWindow.close()},500)}
     }
     callback({requestHeaders:headers});
+  });
+  pikpakSession.webRequest.onBeforeRequest({urls:['https://user.mypikpak.com/v1/auth/token']},details=>{
+    const parsed=parseUploadedTokenRequest(details?.uploadData);
+    if(!parsed)return;
+    const current=readAccount();
+    writeAccount({accessToken:current.accessToken,refreshToken:parsed.refreshToken,clientId:parsed.clientId||current.clientId,source:current.source||'web-login',updatedAt:Date.now()});
+    logger.info('auth','Refresh token captured from official token request');
   });
 }
 function refreshOfficialAuth(){
@@ -133,6 +229,7 @@ function refreshOfficialAuth(){
     const waiter={previous,resolve:()=>finish(true)};authRefreshWaiters.add(waiter);const timer=setTimeout(()=>finish(false),18000);
     authRefreshWindow=new BrowserWindow({show:false,width:900,height:650,webPreferences:{session:session.fromPartition('persist:pikpak-login'),contextIsolation:true,nodeIntegration:false,sandbox:true}});
     authRefreshWindow.on('closed',()=>{authRefreshWindow=null});
+    authRefreshWindow.webContents.on('did-finish-load',()=>{setTimeout(()=>captureStoredCredentials(authRefreshWindow?.webContents),2500)});
     authRefreshWindow.loadURL('https://mypikpak.com/drive/all').catch(()=>finish(false));
   }).finally(()=>{authRefreshPromise=null});
   return authRefreshPromise;
@@ -141,6 +238,7 @@ function openLoginWindow(){
   if(loginWindow&&!loginWindow.isDestroyed()){loginWindow.focus();return}
   loginWindow=new BrowserWindow({width:1080,height:760,minWidth:760,minHeight:560,title:'登录 PikPak',autoHideMenuBar:true,webPreferences:{session:session.fromPartition('persist:pikpak-login'),contextIsolation:true,nodeIntegration:false}});
   loginWindow.loadURL('https://mypikpak.com/drive/all');
+  loginWindow.webContents.on('did-finish-load',()=>{setTimeout(()=>captureStoredCredentials(loginWindow?.webContents),2500)});
   loginWindow.on('closed',()=>{loginWindow=null;if(loginCompletion){const done=loginCompletion;loginCompletion=null;done(accountStatus())}});
 }
 
@@ -383,7 +481,7 @@ ipcMain.handle('account:about', async () => {
   const data=await apiRequest('https://api-drive.mypikpak.com/drive/v1/about',{action:'GET:/drive/v1/about',authorization:account.accessToken});
   return {quota:normalizeQuota(data),user:data.user || null,kind:data.kind || ''};
 });
-ipcMain.handle('account:set-token', (_, token) => { writeAccount({ accessToken:token, source:'manual-token' }); return { connected:!!token }; });
+ipcMain.handle('account:set-token', (_, token) => { clearAccount(); writeAccount({ accessToken:token, source:'manual-token' }); return { connected:!!token }; });
 ipcMain.handle('account:login',()=>new Promise(resolve=>{loginCompletion=resolve;openLoginWindow()}));
 ipcMain.handle('account:logout',async()=>{clearAccount();rotateDeviceId();await session.fromPartition('persist:pikpak-login').clearStorageData();return accountStatus()});
 ipcMain.handle('share:open', async (_, rawUrl) => openShareDirectory(rawUrl));
@@ -669,7 +767,7 @@ function createWindow() {
   else win.loadFile(path.join(__dirname,'..','dist','index.html'));
 }
 
-app.whenReady().then(() => { logger.init(app.getPath('userData')); restoreDeviceId(); logger.info('app', 'Application ready', { version: app.getVersion() }); loadSettings();loadDownloadHistory();loadUploadHistory();loadPlaybackHistory();loadUploadResumes();installPikPakSessionCapture(); installDownloadManager(); createWindow(); app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); }); });
+app.whenReady().then(() => { logger.init(app.getPath('userData')); restoreDeviceId(); restoreTokenRefreshSchedule(); logger.info('app', 'Application ready', { version: app.getVersion() }); loadSettings();loadDownloadHistory();loadUploadHistory();loadPlaybackHistory();loadUploadResumes();installPikPakSessionCapture(); installDownloadManager(); createWindow(); app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); }); });
 app.on('before-quit',()=>{playingViewers.clear();updatePlaybackPowerBlocker();clearTimeout(downloadSaveTimer);clearTimeout(uploadSaveTimer);clearTimeout(playbackSaveTimer);clearTimeout(uploadResumesTimer);flushDownloadHistory();flushUploadHistory();flushPlaybackHistory();flushUploadResumes()});
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 

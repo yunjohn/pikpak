@@ -217,10 +217,45 @@ function accountForStorage(account = {}, previous = {}, fallbackDeviceId = '', n
   const candidate = account.deviceId || previous.deviceId || fallbackDeviceId;
   return {
     accessToken: String(account.accessToken || ''),
+    refreshToken: String(account.refreshToken || previous.refreshToken || ''),
+    clientId: String(account.clientId || previous.clientId || ''),
+    tokenExpiresAt: Math.max(0, Number(account.tokenExpiresAt || previous.tokenExpiresAt) || 0),
     deviceId: isValidDeviceId(candidate) ? String(candidate) : '',
     source: account.source || previous.source || '',
     updatedAt: account.updatedAt || now
   };
+}
+
+function extractCredentialsFromStorage(entries = {}) {
+  for (const [key, raw] of Object.entries(entries || {})) {
+    if (typeof raw !== 'string' || raw.length < 20 || raw.length > 100000) continue;
+    if (!/[Tt]oken/.test(key) && !raw.includes('refresh_token')) continue;
+    let value = raw;
+    try {
+      value = JSON.parse(raw);
+      if (typeof value === 'string') value = JSON.parse(value);
+    } catch { continue }
+    const source = value && typeof value === 'object' ? value : null;
+    if (!source) continue;
+    const refreshToken = String(source.refresh_token || source.refreshToken || '');
+    const accessToken = String(source.access_token || source.accessToken || '');
+    if (!refreshToken) continue;
+    return {
+      refreshToken,
+      accessToken,
+      clientId: String(source.client_id || source.clientId || ''),
+      storageKey: String(key)
+    };
+  }
+  return null;
+}
+
+function buildTokenRefreshBody({ refreshToken, clientId = '' } = {}) {
+  const token = String(refreshToken || '').trim();
+  if (!token) throw new Error('缺少 refresh_token，无法刷新登录状态');
+  const resolvedClientId = String(clientId || CLIENT_ID).trim();
+  if (!resolvedClientId) throw new Error('缺少 client_id，无法刷新登录状态');
+  return { client_id: resolvedClientId, grant_type: 'refresh_token', refresh_token: token, client_secret: '' };
 }
 
 function decodeSubtitleBytes(input) {
@@ -240,4 +275,4 @@ function playbackSourcesFromFile(file = {}) {
   const seen=new Set();return values.filter(source=>/^https?:\/\//i.test(source.url)&&!seen.has(source.url)&&seen.add(source.url));
 }
 
-module.exports = { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, matchSubtitles, detectConflicts, generateUniqueName, buildInterruptedDownloadOptions, isValidDeviceId, accountForStorage, decodeSubtitleBytes, playbackSourcesFromFile };
+module.exports = { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, matchSubtitles, detectConflicts, generateUniqueName, buildInterruptedDownloadOptions, isValidDeviceId, accountForStorage, extractCredentialsFromStorage, buildTokenRefreshBody, decodeSubtitleBytes, playbackSourcesFromFile };
