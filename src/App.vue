@@ -1,6 +1,5 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue';
-import FolderTree from './FolderTree.vue';
 
 const api = window.pikpak || {
   getAccount: async()=>({connected:false}), getAccountAbout:async()=>({quota:null}), onAccountExpired:()=>()=>{}, setAccessToken:async token=>({connected:!!token}), login:async()=>({connected:false}), logout:async()=>({connected:false}),
@@ -373,9 +372,6 @@ onMounted(async()=>{
         <button :class="{active:mode==='trash'}" @click="loadTrash"><span>♲</span> 回收站</button>
         <button :class="{active:mode==='settings'}" @click="mode='settings';clearSelection()"><span>⚙</span> 设置</button>
       </nav>
-      <div class="tree-title">当前目录</div>
-      <button class="tree-root" :class="{active:mode==='drive'&&pathStack.at(-1)?.id===''}" @click="loadDrive()">📂 全部文件</button>
-      <div class="tree-scroll"><FolderTree :nodes="treeChildren['']||[]" :children="treeChildren" :expanded="treeExpanded" :current-id="mode==='drive'?(pathStack.at(-1)?.id||''):''" @toggle="toggleTree" @open="openTree" /></div>
       <button v-if="account.connected" class="quota-card" title="点击刷新容量" @click="refreshQuota"><template v-if="quota"><span><b>存储空间</b><small>{{size(quota.used)}} / {{size(quota.limit)}}</small></span><em>{{quota.percent.toFixed(1)}}%</em><i><u :style="{width:quota.percent+'%'}"></u></i></template><span v-else><b>存储空间</b><small>点击刷新</small></span></button>
       <button class="account-card" @click="account.connected?logout():webLogin()"><span :class="['dot',{online:account.connected}]"></span>{{account.connected?'账户已连接 · 退出':'网页登录 PikPak'}}</button>
     </aside>
