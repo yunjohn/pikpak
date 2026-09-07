@@ -2,7 +2,7 @@ const { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, session, sh
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
-const { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, buildInterruptedDownloadOptions } = require('./core.cjs');
+const { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, buildInterruptedDownloadOptions, isValidDeviceId, accountForStorage } = require('./core.cjs');
 const { logger } = require('./logger.cjs');
 
 process.on('uncaughtException', err => logger.error('process', 'Uncaught exception', err?.stack || err));
@@ -46,12 +46,15 @@ function readAccount() {
   } catch { return { accessToken: '' }; }
 }
 function writeAccount(account) {
-  const text = JSON.stringify({ accessToken:String(account.accessToken || ''), source:account.source || '', updatedAt:account.updatedAt || Date.now() });
+  const previous=readAccount();
+  const text = JSON.stringify(accountForStorage(account,previous,deviceId));
   const data = safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(text) : Buffer.from(text);
   fs.mkdirSync(path.dirname(configPath()), { recursive: true });
   fs.writeFileSync(configPath(), data);
 }
 function clearAccount() { try { fs.unlinkSync(configPath()); } catch {} }
+function restoreDeviceId(){const saved=String(readAccount().deviceId||'');if(isValidDeviceId(saved))deviceId=saved}
+function rotateDeviceId(){deviceId=crypto.randomBytes(16).toString('hex');captcha={token:'',expiresAt:0,action:''}}
 async function getCaptcha(action) {
   if (captcha.token && captcha.action === action && Date.now() < captcha.expiresAt) return captcha.token;
   const timestamp = String(Date.now());
@@ -373,9 +376,9 @@ ipcMain.handle('account:about', async () => {
   const data=await apiRequest('https://api-drive.mypikpak.com/drive/v1/about',{action:'GET:/drive/v1/about',authorization:account.accessToken});
   return {quota:normalizeQuota(data),user:data.user || null,kind:data.kind || ''};
 });
-ipcMain.handle('account:set-token', (_, token) => { writeAccount({ accessToken:token }); return { connected:!!token }; });
+ipcMain.handle('account:set-token', (_, token) => { writeAccount({ accessToken:token, source:'manual-token' }); return { connected:!!token }; });
 ipcMain.handle('account:login',()=>new Promise(resolve=>{loginCompletion=resolve;openLoginWindow()}));
-ipcMain.handle('account:logout',async()=>{clearAccount();await session.fromPartition('persist:pikpak-login').clearStorageData();return accountStatus()});
+ipcMain.handle('account:logout',async()=>{clearAccount();rotateDeviceId();await session.fromPartition('persist:pikpak-login').clearStorageData();return accountStatus()});
 ipcMain.handle('share:open', async (_, rawUrl) => openShareDirectory(rawUrl));
 ipcMain.handle('share:file-info', async (_, { shareId, fileId }) => {
   const query = new URLSearchParams({ share_id:shareId, file_id:fileId, thumbnail_size:'SIZE_LARGE' });
@@ -656,7 +659,7 @@ function createWindow() {
   else win.loadFile(path.join(__dirname,'..','dist','index.html'));
 }
 
-app.whenReady().then(() => { logger.init(app.getPath('userData')); logger.info('app', 'Application ready', { version: app.getVersion() }); loadSettings();loadDownloadHistory();loadUploadHistory();loadPlaybackHistory();loadUploadResumes();installPikPakSessionCapture(); installDownloadManager(); createWindow(); app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); }); });
+app.whenReady().then(() => { logger.init(app.getPath('userData')); restoreDeviceId(); logger.info('app', 'Application ready', { version: app.getVersion() }); loadSettings();loadDownloadHistory();loadUploadHistory();loadPlaybackHistory();loadUploadResumes();installPikPakSessionCapture(); installDownloadManager(); createWindow(); app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); }); });
 app.on('before-quit',()=>{clearTimeout(downloadSaveTimer);clearTimeout(uploadSaveTimer);clearTimeout(playbackSaveTimer);clearTimeout(uploadResumesTimer);flushDownloadHistory();flushUploadHistory();flushPlaybackHistory();flushUploadResumes()});
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 

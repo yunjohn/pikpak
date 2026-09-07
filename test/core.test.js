@@ -2,9 +2,16 @@ import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
-const { parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, matchSubtitles, detectConflicts, generateUniqueName } = require('../electron/core.cjs');
+const { parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, matchSubtitles, detectConflicts, generateUniqueName, isValidDeviceId, accountForStorage } = require('../electron/core.cjs');
 
 describe('desktop core', () => {
+  it('keeps a stable valid device id with encrypted account data', () => {
+    const saved=accountForStorage({accessToken:'next-token'},{deviceId:'saved-device-id-1234',source:'web-login'},'random-device-id-5678',123);
+    expect(saved).toEqual({accessToken:'next-token',deviceId:'saved-device-id-1234',source:'web-login',updatedAt:123});
+    expect(isValidDeviceId(saved.deviceId)).toBe(true);
+    expect(accountForStorage({accessToken:'token',deviceId:'bad id'}, {}, 'also bad', 456).deviceId).toBe('');
+  });
+
   it('detects name conflicts case-insensitively and separates non-conflicts', () => {
     const sources = [
       { id: '1', name: 'File.txt' },

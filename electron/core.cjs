@@ -209,4 +209,18 @@ function buildInterruptedDownloadOptions(params) {
   };
 }
 
-module.exports = { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, matchSubtitles, detectConflicts, generateUniqueName, buildInterruptedDownloadOptions };
+function isValidDeviceId(value) {
+  return /^[a-zA-Z0-9_-]{16,128}$/.test(String(value || ''));
+}
+
+function accountForStorage(account = {}, previous = {}, fallbackDeviceId = '', now = Date.now()) {
+  const candidate = account.deviceId || previous.deviceId || fallbackDeviceId;
+  return {
+    accessToken: String(account.accessToken || ''),
+    deviceId: isValidDeviceId(candidate) ? String(candidate) : '',
+    source: account.source || previous.source || '',
+    updatedAt: account.updatedAt || now
+  };
+}
+
+module.exports = { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, matchSubtitles, detectConflicts, generateUniqueName, buildInterruptedDownloadOptions, isValidDeviceId, accountForStorage };
