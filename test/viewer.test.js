@@ -98,7 +98,7 @@ describe('image viewer',()=>{
     expect(video.playbackRate).toBe(1.25);
     expect(video.volume).toBe(.4);
     expect(video.muted).toBe(true);
-    expect(video.style.objectFit).toBe('cover');
+    expect(video.style.objectFit).toBe('contain');
     Object.defineProperty(video,'duration',{configurable:true,value:120});
     Object.defineProperty(video,'paused',{configurable:true,value:false});
     video.currentTime=42;video.volume=.5;
@@ -115,14 +115,32 @@ describe('image viewer',()=>{
     dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'p'}));
     await new Promise(resolve=>setTimeout(resolve,0));
     expect(pipCalls).toBe(1);
-    const fit=dom.window.document.querySelector('select[title="画面适配"]');
-    fit.value='fill';fit.dispatchEvent(new dom.window.Event('change'));
-    expect(video.style.objectFit).toBe('fill');
-    expect(JSON.parse(dom.window.localStorage.getItem('pikpak-viewer-video-preferences-v1')).fit).toBe('fill');
+    expect(dom.window.document.querySelector('select[title="画面适配"]')).toBeNull();
     video.dispatchEvent(new dom.window.Event('playing'));
     video.dispatchEvent(new dom.window.Event('pause'));
     expect(playingStates).toEqual([true,false]);
     expect(pauseCalls).toBeGreaterThan(0);
+    dom.window.close();
+  });
+
+  it('refreshes an expired media URL and reloads the video',async()=>{
+    const dom=new JSDOM('<main id="viewer"></main>',{url:'https://local.test/viewer.html?token=refresh',runScripts:'outside-only'});
+    dom.window.TextDecoder=TextDecoder;
+    dom.window.HTMLMediaElement.prototype.pause=()=>{};
+    dom.window.HTMLMediaElement.prototype.load=()=>{};
+    dom.window.HTMLMediaElement.prototype.play=()=>Promise.resolve();
+    let refreshCalls=0;
+    dom.window.viewerPayload={
+      get:async()=>({url:'https://cdn.test/expired.mp4',name:'长视频.mp4',kind:'video',fileId:'drive:video-id',sources:[{url:'https://cdn.test/expired.mp4',label:'原画'}]}),
+      refreshMedia:async()=>{refreshCalls++;return {url:'https://cdn.test/fresh.mp4',sources:[{url:'https://cdn.test/fresh.mp4',label:'原画'}]}}
+    };
+    dom.window.eval(fs.readFileSync(new URL('../electron/viewer.js',import.meta.url),'utf8'));
+    await new Promise(resolve=>setTimeout(resolve,0));
+    const video=dom.window.document.querySelector('video');
+    video.dispatchEvent(new dom.window.Event('error'));
+    await new Promise(resolve=>setTimeout(resolve,0));
+    expect(refreshCalls).toBe(1);
+    expect(video.src).toBe('https://cdn.test/fresh.mp4');
     dom.window.close();
   });
 

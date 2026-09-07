@@ -231,4 +231,13 @@ function decodeSubtitleBytes(input) {
   try{return new TextDecoder('utf-8',{fatal:true}).decode(bytes)}catch{return new TextDecoder('gb18030').decode(bytes)}
 }
 
-module.exports = { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, matchSubtitles, detectConflicts, generateUniqueName, buildInterruptedDownloadOptions, isValidDeviceId, accountForStorage, decodeSubtitleBytes };
+function playbackSourcesFromFile(file = {}) {
+  const rank=value=>{const text=String(value||'').toUpperCase();return text.includes('1080')||text==='FHD'?1080:text.includes('720')||text==='HD'?720:text.includes('480')||text==='SD'?480:0};
+  const toUrl=media=>{let url=String(media?.link?.url||'');const type=String(media?.video?.video_type||media?.video_type||'').toLowerCase();if(type==='mpegts'&&!url.includes('ts_downloader'))url=`https://web-vod-xdrive.mypikpak.com/ts_downloader?client_id=${CLIENT_ID}&url=${encodeURIComponent(url.replace(/[?&]ext=\.m3u8(?=&|$)/,'').replace(/[?&]$/,''))}`;return url};
+  const label=media=>{const text=String(media?.resolution_name||media?.video_stream_id||'').toUpperCase();return rank(text)?`${rank(text)}P`:(media?.is_origin?'原画':'转码')};
+  const medias=Array.isArray(file.medias)?file.medias:[];
+  const values=[...medias.filter(media=>!media?.is_origin&&media?.link?.url).sort((a,b)=>rank(b.resolution_name||b.video_stream_id)-rank(a.resolution_name||a.video_stream_id)).map(media=>({url:toUrl(media),label:label(media)})),...medias.filter(media=>media?.is_origin&&media?.link?.url).map(media=>({url:toUrl(media),label:'原画'})),...(file.web_content_link?[{url:String(file.web_content_link),label:'原始文件'}]:[])];
+  const seen=new Set();return values.filter(source=>/^https?:\/\//i.test(source.url)&&!seen.has(source.url)&&seen.add(source.url));
+}
+
+module.exports = { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, matchSubtitles, detectConflicts, generateUniqueName, buildInterruptedDownloadOptions, isValidDeviceId, accountForStorage, decodeSubtitleBytes, playbackSourcesFromFile };

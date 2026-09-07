@@ -2,9 +2,15 @@ import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
-const { parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, matchSubtitles, detectConflicts, generateUniqueName, isValidDeviceId, accountForStorage, decodeSubtitleBytes } = require('../electron/core.cjs');
+const { parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, matchSubtitles, detectConflicts, generateUniqueName, isValidDeviceId, accountForStorage, decodeSubtitleBytes, playbackSourcesFromFile } = require('../electron/core.cjs');
 
 describe('desktop core', () => {
+  it('normalizes refreshed playback sources and removes duplicate URLs', () => {
+    const sources=playbackSourcesFromFile({medias:[{resolution_name:'720P',link:{url:'https://cdn.test/720.m3u8'}},{resolution_name:'1080P',link:{url:'https://cdn.test/1080.m3u8'}},{is_origin:true,link:{url:'https://cdn.test/original.mp4'}}],web_content_link:'https://cdn.test/original.mp4'});
+    expect(sources.map(source=>source.label)).toEqual(['1080P','720P','原画']);
+    expect(sources.map(source=>source.url)).toHaveLength(3);
+  });
+
   it('decodes UTF-8, UTF-16 and GB18030 subtitle files', () => {
     expect(decodeSubtitleBytes(Buffer.from('\ufeff中文字幕','utf8'))).toBe('中文字幕');
     expect(decodeSubtitleBytes(Buffer.concat([Buffer.from([0xff,0xfe]),Buffer.from('中文字幕','utf16le')]))).toBe('中文字幕');
