@@ -81,6 +81,8 @@ describe('desktop core', () => {
 
   it('builds an official URL-upload task and rejects unsupported input', () => {
     expect(buildOfflineTaskPayload(' magnet:?xt=urn:btih:abc ')).toMatchObject({upload_type:'UPLOAD_TYPE_URL',url:{url:'magnet:?xt=urn:btih:abc'},folder_type:'DOWNLOAD'});
+    expect(buildOfflineTaskPayload('https://example.test/file','folder-1')).toMatchObject({upload_type:'UPLOAD_TYPE_URL',parent_id:'folder-1'});
+    expect(buildOfflineTaskPayload('https://example.test/file','folder-1')).not.toHaveProperty('folder_type');
     expect(() => buildOfflineTaskPayload('not a link')).toThrow('有效');
   });
 

@@ -19,7 +19,7 @@ const offlineTasks=ref([]), offlineUrl=ref('');
 const thumbFailed=ref({});
 const dragUpload=ref(false);
 const archive=ref({open:false,name:'',items:[],path:'',nodes:[],password:'',loading:false,error:'',request:null});
-const shareSaveDialog=ref({open:false,targetId:'',targetName:'根目录',folders:[],loading:false,path:[{id:'',name:'根目录'}]});
+const shareSaveDialog=ref({open:false,purpose:'share',pendingUrl:'',targetId:'',targetName:'根目录',folders:[],loading:false,path:[{id:'',name:'根目录'}]});
 const conflictDialog=ref({open:false,operation:'copy',conflicts:[],nonConflicts:[],targetId:'',targetName:'',loading:false});
 const batchResultModal=ref({open:false,title:'批量操作完成',operation:'',successCount:0,skipCount:0,failCount:0,details:[]});
 const query=ref(''), sortBy=ref('name'), sortDirection=ref(1);
@@ -162,9 +162,14 @@ async function itemAction(item,action){selectedIds.value=[item.id];selected.valu
 async function loadSaveDialogFolders(parentId){shareSaveDialog.value.loading=true;try{const res=await api.listDrive(parentId);shareSaveDialog.value.folders=(res.files||[]).filter(item=>item.kind==='drive#folder')}catch(e){error.value=e.message||String(e)}finally{shareSaveDialog.value.loading=false}}
 async function navigateSaveDialog(folder){shareSaveDialog.value.targetId=folder.id;shareSaveDialog.value.targetName=folder.name;shareSaveDialog.value.path.push(folder);await loadSaveDialogFolders(folder.id)}
 async function navigateSaveDialogCrumb(index){shareSaveDialog.value.path=shareSaveDialog.value.path.slice(0,index+1);const current=shareSaveDialog.value.path.at(-1);shareSaveDialog.value.targetId=current?.id||'';shareSaveDialog.value.targetName=current?.name||'根目录';await loadSaveDialogFolders(shareSaveDialog.value.targetId)}
-async function saveShareSelected(){if(!selectedItems.value.length||mode.value!=='share'||!share.value)return;if(!account.value.connected){error.value='请先连接 PikPak 账户，再保存分享文件';return}shareSaveDialog.value={open:true,targetId:'',targetName:'根目录',folders:[],loading:true,path:[{id:'',name:'根目录'}]};await loadSaveDialogFolders('')}
-async function confirmSaveShare(toParentId=''){
+async function saveShareSelected(){if(!selectedItems.value.length||mode.value!=='share'||!share.value)return;if(!account.value.connected){error.value='请先连接 PikPak 账户，再保存分享文件';return}shareSaveDialog.value={open:true,purpose:'share',pendingUrl:'',targetId:'',targetName:'根目录',folders:[],loading:true,path:[{id:'',name:'根目录'}]};await loadSaveDialogFolders('')}
+async function confirmSaveTarget(toParentId=''){
   shareSaveDialog.value.open=false;
+  if(shareSaveDialog.value.purpose==='offline'){
+    const url=shareSaveDialog.value.pendingUrl;
+    await run(async()=>{await api.createOfflineTask({url,parentId:toParentId||''});offlineUrl.value='';notice.value=toParentId?`离线下载任务已创建，将保存到「${shareSaveDialog.value.targetName}」`:'离线下载任务已创建，将保存到默认下载目录';await loadOffline();setTimeout(()=>{notice.value=''},4000)});
+    return;
+  }
   const items=selectedItems.value.slice();
   await run(async()=>{
     await api.restoreShare({shareId:share.value.shareId,passCodeToken:share.value.passCodeToken||'',fileIds:items.map(item=>item.id),toParentId:toParentId||undefined});
@@ -184,7 +189,7 @@ function offlineName(task){return task.name||task.file_name||task.reference_reso
 function offlinePhase(task){const phase=String(task.phase||'').toUpperCase();if(phase.includes('COMPLETE'))return '已完成';if(phase.includes('ERROR')||phase.includes('FAILED'))return '失败';if(phase.includes('PAUSED'))return '已暂停';if(phase.includes('RUNNING'))return '下载中';return '等待中'}
 function offlinePercent(task){const value=Number(task.progress||task.progress_percent||0);return Math.max(0,Math.min(100,Math.round(value<=1?value*100:value)))}
 async function loadOffline(){await run(async()=>{mode.value='offline';offlineTasks.value=(await api.listOfflineTasks()).tasks||[];selected.value=null})}
-async function createOffline(){const value=offlineUrl.value.trim();if(!value)return;await run(async()=>{await api.createOfflineTask(value);offlineUrl.value='';notice.value='离线下载任务已创建';await loadOffline();setTimeout(()=>{notice.value=''},4000)})}
+async function createOffline(){const value=offlineUrl.value.trim();if(!value)return;if(!account.value.connected){error.value='请先连接 PikPak 账户';return}shareSaveDialog.value={open:true,purpose:'offline',pendingUrl:value,targetId:'',targetName:'根目录',folders:[],loading:true,path:[{id:'',name:'根目录'}]};await loadSaveDialogFolders('')}
 async function deleteOffline(id){if(!window.confirm('删除这条离线任务记录？已保存的文件不会被删除。'))return;await run(async()=>{await api.deleteOfflineTask(id);await loadOffline()})}
 function itemIsStarred(item){return !!(item?.starred||(item?.tags||[]).some(tag=>tag?.name==='STAR'))}
 async function toggleStarred(){if(!selectedItems.value.length)return;const value=selectedItems.value.some(item=>!itemIsStarred(item));await run(async()=>{await api.setStarred({ids:selectedItems.value.map(item=>item.id),starred:value});notice.value=value?`已收藏 ${selectedItems.value.length} 项`:`已取消收藏 ${selectedItems.value.length} 项`;if(mode.value==='starred')await loadStarred();else{files.value=files.value.map(item=>selectedIds.value.includes(item.id)?{...item,starred:value}:item);if(selected.value)selected.value={...selected.value,starred:value}}setTimeout(()=>{notice.value=''},3000)})}
@@ -628,7 +633,7 @@ onUnmounted(()=>{
     </div>
     <div v-if="shareSaveDialog.open" class="archive-overlay" @click.self="shareSaveDialog.open=false">
       <section class="archive-dialog" role="dialog" aria-modal="true" aria-label="选择保存位置">
-        <header><div><small>保存分享文件到我的 PikPak</small><h2>保存到：{{shareSaveDialog.targetName}}</h2></div><button class="remove" title="关闭" @click="shareSaveDialog.open=false">×</button></header>
+        <header><div><small>{{shareSaveDialog.purpose==='offline'?'选择离线下载保存位置':'保存分享文件到我的 PikPak'}}</small><h2>保存到：{{shareSaveDialog.targetName}}</h2></div><button class="remove" title="关闭" @click="shareSaveDialog.open=false">×</button></header>
         <nav class="archive-crumbs"><button v-for="(part,index) in shareSaveDialog.path" :key="part.id" @click="navigateSaveDialogCrumb(index)">{{part.name}}<span v-if="index<shareSaveDialog.path.length-1">›</span></button></nav>
         <div class="archive-head"><span>网盘文件夹</span><span>操作</span></div>
         <div class="archive-list">
@@ -637,8 +642,8 @@ onUnmounted(()=>{
           <button v-for="folder in shareSaveDialog.folders" :key="folder.id" class="archive-row" title="点击选择并进入" @click="navigateSaveDialog(folder)"><span><i>📁</i>{{folder.name}}</span><em>进入 ›</em></button>
         </div>
         <footer class="share-dialog-actions">
-          <button class="soft" @click="confirmSaveShare('')">直接保存到根目录</button>
-          <button class="primary" @click="confirmSaveShare(shareSaveDialog.targetId)">保存到当前目录 ({{shareSaveDialog.targetName}})</button>
+          <button class="soft" @click="confirmSaveTarget('')">{{shareSaveDialog.purpose==='offline'?'使用默认下载目录':'直接保存到根目录'}}</button>
+          <button class="primary" @click="confirmSaveTarget(shareSaveDialog.targetId)">{{shareSaveDialog.purpose==='offline'?'下载到':'保存到当前目录'}} ({{shareSaveDialog.targetName}})</button>
         </footer>
       </section>
     </div>

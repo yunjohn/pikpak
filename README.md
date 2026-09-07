@@ -16,11 +16,11 @@ npm run dev
 npm run package:win
 ```
 
-产物位于 `release/PikPak-Desktop-0.5.0-portable.exe`。
+产物位于 `release/PikPak-Desktop-<版本>-portable.exe`。
 
 ## 当前能力
 
-- Windows 桌面三栏资源管理器界面
+- Windows 桌面文件管理界面
 - 官方网页登录窗口与授权请求捕获
 - 使用系统安全存储加密保存访问令牌
 - 浏览已连接账户的目录和文件
@@ -36,6 +36,7 @@ npm run package:win
 - 复制、剪切并粘贴到其他目录
 - 回收站浏览、恢复和永久删除
 - 主进程统一处理 PikPak API 和 captcha 签名
+- 离线下载创建时选择网盘保存目录
 
 ## 当前限制
 

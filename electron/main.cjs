@@ -427,7 +427,7 @@ ipcMain.handle('shares:list', async () => {
 });
 ipcMain.handle('shares:cancel',(_,ids)=>driveMutation('/drive/v1/share:batchDelete',{body:{ids:normalizeIds(ids)}}));
 ipcMain.handle('shares:copy',(_,item)=>{const url=String(item?.shareUrl||'');if(!/^https?:\/\//i.test(url))throw new Error('分享链接无效');const text=item?.passCode?`${url}\n提取码：${item.passCode}`:url;clipboard.writeText(text);return text});
-ipcMain.handle('offline:create', async (_, url) => driveMutation('/drive/v1/files',{body:buildOfflineTaskPayload(url)}));
+ipcMain.handle('offline:create', async (_, value) => {const payload=value&&typeof value==='object'?value:{url:value};return driveMutation('/drive/v1/files',{body:buildOfflineTaskPayload(payload.url,payload.parentId)});});
 ipcMain.handle('offline:list', async () => {
   const account=readAccount();if(!account.accessToken)throw new Error('请先连接 PikPak 账户');
   const query=new URLSearchParams({type:'offline',limit:'100',thumbnail_size:'SIZE_SMALL',with_reference_resource:'true'});

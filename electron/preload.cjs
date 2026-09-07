@@ -29,7 +29,7 @@ contextBridge.exposeInMainWorld('pikpak', {
   listMyShares: () => ipcRenderer.invoke('shares:list'),
   cancelShares: ids => ipcRenderer.invoke('shares:cancel', ids),
   copyShare: item => ipcRenderer.invoke('shares:copy', item),
-  createOfflineTask: url => ipcRenderer.invoke('offline:create', url),
+  createOfflineTask: payload => ipcRenderer.invoke('offline:create', payload),
   listOfflineTasks: () => ipcRenderer.invoke('offline:list'),
   deleteOfflineTask: id => ipcRenderer.invoke('offline:delete', id),
   startDownload: payload => ipcRenderer.invoke('download:start', payload),

@@ -38,10 +38,12 @@ function buildShareRestorePayload({ shareId, passCodeToken='', fileIds=[], toPar
   if(toParentId)payload.to_parent_id=String(toParentId).trim();
   return payload;
 }
-function buildOfflineTaskPayload(value) {
+function buildOfflineTaskPayload(value,parentId='') {
   const url=String(value || '').trim();
   if(!/^(magnet:\?|https?:\/\/|ed2k:\/\/)/i.test(url))throw new Error('请输入有效的磁力链、HTTP、HTTPS 或 ED2K 地址');
-  return {kind:'drive#file',upload_type:'UPLOAD_TYPE_URL',url:{url},params:{from:'manual',with_thumbnail:'true'},folder_type:'DOWNLOAD'};
+  const payload={kind:'drive#file',upload_type:'UPLOAD_TYPE_URL',url:{url},params:{from:'manual',with_thumbnail:'true'}};
+  const target=String(parentId||'').trim();if(target)payload.parent_id=target;else payload.folder_type='DOWNLOAD';
+  return payload;
 }
 function normalizeQuota(data) {
   const used=Number(data?.quota?.usage), limit=Number(data?.quota?.limit);

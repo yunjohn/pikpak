@@ -2,14 +2,21 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execSync } = require('node:child_process');
 
-const root = 'D:\\dev\\pikpak';
+const root = path.resolve(__dirname, '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-const version = pkg.version || '0.40.0';
+const version = pkg.version;
+if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version || '')) {
+  throw new Error(`Invalid package version: ${version}`);
+}
+const releaseRoot = path.resolve(root, 'release');
 const staging = path.join(root, 'release', `app-staging-${version.replace(/\./g, '')}`);
 const asarOut = path.join(root, 'release', `app-${version}.asar`);
 const targetAsar = path.join(root, 'release', 'win-unpacked', 'resources', 'app.asar');
 
 console.log('Staging app files to:', staging);
+if (path.dirname(path.resolve(staging)) !== releaseRoot || path.resolve(staging) === releaseRoot) {
+  throw new Error(`Unsafe staging path: ${staging}`);
+}
 if (fs.existsSync(staging)) {
   fs.rmSync(staging, { recursive: true, force: true });
 }

@@ -1,6 +1,6 @@
 {
   "name": "pikpak-desktop-client",
-  "version": "0.40.0",
+  "version": "0.41.0",
   "description": "Independent PikPak desktop file browser and media client",
   "author": "PikPak Desktop contributors",
   "private": true,
@@ -10,6 +10,8 @@
     "dev": "concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "build": "node scripts/verify-ipc.mjs && node scripts/prepare-viewer.mjs && vite build && node scripts/verify-dist.mjs",
     "package:win": "npm run build && electron-builder --win portable",
+    "stage:asar": "node scripts/stage-asar.cjs",
+    "smoke": "node scripts/smoke.cjs",
     "preview": "vite preview",
     "test": "vitest run"
   },
