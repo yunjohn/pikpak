@@ -2,9 +2,32 @@ import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
-const { parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, matchSubtitles } = require('../electron/core.cjs');
+const { parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, matchSubtitles, detectConflicts, generateUniqueName } = require('../electron/core.cjs');
 
 describe('desktop core', () => {
+  it('detects name conflicts case-insensitively and separates non-conflicts', () => {
+    const sources = [
+      { id: '1', name: 'File.txt' },
+      { id: '2', name: 'unique.mp4' },
+      { id: '3', name: 'Folder' }
+    ];
+    const targets = [
+      { id: 't1', name: 'file.TXT' },
+      { id: 't2', name: 'other.pdf' },
+      { id: 't3', name: 'folder' }
+    ];
+    const { conflicts, nonConflicts } = detectConflicts(sources, targets);
+    expect(conflicts.map(c => c.source.name)).toEqual(['File.txt', 'Folder']);
+    expect(conflicts.map(c => c.existing.id)).toEqual(['t1', 't3']);
+    expect(nonConflicts.map(n => n.name)).toEqual(['unique.mp4']);
+  });
+
+  it('generates unique copy names avoiding existing collisions', () => {
+    expect(generateUniqueName('doc.pdf', ['file.txt'])).toBe('doc.pdf');
+    expect(generateUniqueName('doc.pdf', ['doc.pdf'])).toBe('doc - 副本.pdf');
+    expect(generateUniqueName('doc.pdf', ['doc.pdf', 'doc - 副本.pdf'])).toBe('doc - 副本 (2).pdf');
+    expect(generateUniqueName('MyFolder', ['MyFolder'])).toBe('MyFolder - 副本');
+  });
   it('parses a PikPak share id and opaque directory token', () => {
     expect(parseShareUrl('https://mypikpak.com/s/share-id/folder-token')).toMatchObject({shareId:'share-id',parentToken:'folder-token'});
     expect(parseShareUrl('https://mypikpak.com/s/share-id?pass_code=1234')).toMatchObject({passCode:'1234'});

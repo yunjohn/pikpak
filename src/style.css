@@ -27,3 +27,15 @@
 .toolbar-actions .accent:hover{background:#d5e4fc}
 .share-dialog-actions{display:flex;justify-content:flex-end;gap:10px;align-items:center}
 .share-dialog-actions button{padding:8px 14px;font-size:12px}
+.conflict-summary{padding:12px 22px;background:#fff8ee;color:#b26a00;font-size:13px;border-bottom:1px solid #faeccd}
+.conflict-dialog-actions,.batch-result-actions{display:flex;justify-content:flex-end;gap:10px;align-items:center}
+.conflict-dialog-actions button,.batch-result-actions button{padding:8px 14px;font-size:12px}
+.batch-result-stats{display:flex;gap:10px;padding:12px 22px;background:#f8fafd;border-bottom:1px solid #e7ecf3}
+.stat-badge{display:inline-flex;align-items:center;padding:4px 10px;border-radius:12px;font-size:12px;font-weight:600}
+.stat-success{background:#eaf8ef;color:#1e8e3e}
+.stat-skip{background:#fff8ee;color:#b26a00}
+.stat-fail{background:#fdeeee;color:#d93025}
+.result-status-icon{font-style:normal;font-weight:700;font-size:14px;margin-right:6px}
+.result-status-icon.success,.result-msg.success{color:#1e8e3e}
+.result-status-icon.skipped,.result-msg.skipped{color:#b26a00}
+.result-status-icon.failed,.result-msg.failed{color:#d93025}

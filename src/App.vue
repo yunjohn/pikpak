@@ -21,6 +21,8 @@ const thumbFailed=ref({});
 const dragUpload=ref(false);
 const archive=ref({open:false,name:'',items:[],path:'',nodes:[],password:'',loading:false,error:'',request:null});
 const shareSaveDialog=ref({open:false,targetId:'',targetName:'根目录',folders:[],loading:false,path:[{id:'',name:'根目录'}]});
+const conflictDialog=ref({open:false,operation:'copy',conflicts:[],nonConflicts:[],targetId:'',targetName:'',loading:false});
+const batchResultModal=ref({open:false,title:'批量操作完成',operation:'',successCount:0,skipCount:0,failCount:0,details:[]});
 const query=ref(''), sortBy=ref('name'), sortDirection=ref(1);
 const globalQuery=ref(''),searchStats=ref(null),searchLive=ref({scanned:0,folders:0,matchesCount:0,isDone:true});
 const clipboard=ref(null);
@@ -151,7 +153,20 @@ async function loadSaveDialogFolders(parentId){shareSaveDialog.value.loading=tru
 async function navigateSaveDialog(folder){shareSaveDialog.value.targetId=folder.id;shareSaveDialog.value.targetName=folder.name;shareSaveDialog.value.path.push(folder);await loadSaveDialogFolders(folder.id)}
 async function navigateSaveDialogCrumb(index){shareSaveDialog.value.path=shareSaveDialog.value.path.slice(0,index+1);const current=shareSaveDialog.value.path.at(-1);shareSaveDialog.value.targetId=current?.id||'';shareSaveDialog.value.targetName=current?.name||'根目录';await loadSaveDialogFolders(shareSaveDialog.value.targetId)}
 async function saveShareSelected(){if(!selectedItems.value.length||mode.value!=='share'||!share.value)return;if(!account.value.connected){error.value='请先连接 PikPak 账户，再保存分享文件';return}shareSaveDialog.value={open:true,targetId:'',targetName:'根目录',folders:[],loading:true,path:[{id:'',name:'根目录'}]};await loadSaveDialogFolders('')}
-async function confirmSaveShare(toParentId=''){shareSaveDialog.value.open=false;await run(async()=>{await api.restoreShare({shareId:share.value.shareId,passCodeToken:share.value.passCodeToken||'',fileIds:selectedItems.value.map(item=>item.id),toParentId:toParentId||undefined});const targetLabel=toParentId?`到「${shareSaveDialog.value.targetName}」`:'到网盘根目录';notice.value=`已提交保存 ${selectedItems.value.length} 项${targetLabel}`;setTimeout(()=>{notice.value=''},4000)})}
+async function confirmSaveShare(toParentId=''){
+  shareSaveDialog.value.open=false;
+  const items=selectedItems.value.slice();
+  await run(async()=>{
+    await api.restoreShare({shareId:share.value.shareId,passCodeToken:share.value.passCodeToken||'',fileIds:items.map(item=>item.id),toParentId:toParentId||undefined});
+    const targetLabel=toParentId?`到「${shareSaveDialog.value.targetName}」`:'到我的网盘根目录';
+    if(items.length>2){
+      showBatchResult({title:'分享保存完成',operation:'saveShare',details:items.map(i=>({name:i.name,status:'success',message:`已保存${targetLabel}`}))});
+    }else{
+      notice.value=`已提交保存 ${items.length} 项${targetLabel}`;
+      setTimeout(()=>{notice.value=''},4000);
+    }
+  });
+}
 async function createShareSelected(){if(!selectedItems.value.length)return;await run(async()=>{const result=await api.createShare({ids:selectedItems.value.map(item=>item.id),expirationDays:7,encrypted:true});notice.value=`分享链接已复制${result.passCode?`，提取码 ${result.passCode}`:''}`;setTimeout(()=>{notice.value=''},6000)})}
 async function copyMyShare(){if(selectedItems.value.length!==1)return;const item=selectedItems.value[0];await api.copyShare({shareUrl:item.share_url,passCode:item.pass_code});notice.value=`“${item.name}”的链接已复制`;setTimeout(()=>{notice.value=''},3500)}
 async function cancelMyShares(){if(!selectedItems.value.length||!window.confirm(`取消选中的 ${selectedItems.value.length} 个分享？原网盘文件不会被删除。`))return;await run(async()=>{await api.cancelShares(selectedItems.value.map(item=>item.id));notice.value='分享已取消';await loadMyShares();setTimeout(()=>{notice.value=''},3500)})}
@@ -188,11 +203,141 @@ async function webLogin(){await run(async()=>{account.value=await api.login();if
 async function logout(){await run(async()=>{account.value=await api.logout();quota.value=null;files.value=[];resetNavigationState();try{localStorage.removeItem(NAV_STATE_KEY)}catch{}})}
 async function createFolder(){const name=window.prompt('新文件夹名称');if(!name?.trim())return;await run(async()=>{await api.createFolder({parentId:pathStack.value.at(-1)?.id||'',name:name.trim()});await loadDrive(pathStack.value.at(-1)?.id||'',pathStack.value.at(-1)?.name,'replace')})}
 async function renameSelected(){if(!selected.value)return;const name=window.prompt('新名称',selected.value.name);if(!name?.trim()||name.trim()===selected.value.name)return;await run(async()=>{await api.rename({id:selected.value.id,name:name.trim()});await loadDrive(pathStack.value.at(-1)?.id||'',pathStack.value.at(-1)?.name,'replace')})}
-async function trashSelected(){if(!selectedItems.value.length||!window.confirm(`确定将选中的 ${selectedItems.value.length} 项移入回收站吗？`))return;await run(async()=>{await api.trash(selectedItems.value.map(item=>item.id));await loadDrive(pathStack.value.at(-1)?.id||'',pathStack.value.at(-1)?.name,'replace')})}
 function stageTransfer(operation){if(!selectedItems.value.length)return;clipboard.value={operation,items:selectedItems.value.map(({id,name,kind})=>({id,name,kind})),sourceParentId:pathStack.value.at(-1)?.id||''}}
-async function pasteTransfer(){if(!clipboard.value||mode.value!=='drive')return;const targetId=pathStack.value.at(-1)?.id||'';if(clipboard.value.sourceParentId===targetId){error.value='源目录与目标目录相同';return}await run(async()=>{await api.transfer({operation:clipboard.value.operation,ids:clipboard.value.items.map(item=>item.id),parentId:targetId});if(clipboard.value.operation==='move')clipboard.value=null;await loadDrive(targetId,pathStack.value.at(-1)?.name,'replace')})}
-async function restoreSelected(){if(!selectedItems.value.length)return;await run(async()=>{await api.restoreTrash(selectedItems.value.map(item=>item.id));await loadTrash()})}
-async function deleteForever(){if(!selectedItems.value.length||!window.confirm(`永久删除选中的 ${selectedItems.value.length} 项？此操作无法撤销。`))return;await run(async()=>{await api.deleteTrash(selectedItems.value.map(item=>item.id));await loadTrash()})}
+function showBatchResult({title,operation,details}){
+  const successCount=details.filter(d=>d.status==='success').length;
+  const skipCount=details.filter(d=>d.status==='skipped').length;
+  const failCount=details.filter(d=>d.status==='failed').length;
+  batchResultModal.value={open:true,title:title||'批量操作完成',operation:operation||'',successCount,skipCount,failCount,details};
+}
+function detectConflicts(sources,targets){
+  const targetMap=new Map();
+  for(const t of targets||[]){if(t?.name)targetMap.set(String(t.name).trim().toLowerCase(),t)}
+  const conflicts=[],nonConflicts=[];
+  for(const s of sources||[]){
+    const key=String(s?.name||'').trim().toLowerCase();
+    if(key&&targetMap.has(key))conflicts.push({source:s,existing:targetMap.get(key)});
+    else if(s)nonConflicts.push(s);
+  }
+  return {conflicts,nonConflicts};
+}
+function generateUniqueName(name,existingNames){
+  const existingSet=new Set((existingNames||[]).map(n=>String(n).trim().toLowerCase()));
+  const trimmed=String(name||'未命名').trim();
+  if(!existingSet.has(trimmed.toLowerCase()))return trimmed;
+  const dotIdx=trimmed.lastIndexOf('.'),hasExt=dotIdx>0&&dotIdx<trimmed.length-1;
+  const base=hasExt?trimmed.slice(0,dotIdx):trimmed,ext=hasExt?trimmed.slice(dotIdx):'';
+  let candidate=`${base} - 副本${ext}`,count=2;
+  while(existingSet.has(candidate.toLowerCase())){candidate=`${base} - 副本 (${count})${ext}`;count++}
+  return candidate;
+}
+async function executeTransfer(operation,items,targetId,extraDetails=[]){
+  await run(async()=>{
+    try{
+      if(items.length)await api.transfer({operation,ids:items.map(item=>item.id),parentId:targetId});
+      if(operation==='move')clipboard.value=null;
+      await loadDrive(targetId,pathStack.value.at(-1)?.name,'replace');
+      const details=[...items.map(i=>({name:i.name,status:'success',message:operation==='move'?'已剪切并移动':'已复制'})),...extraDetails];
+      if(extraDetails.length>0||details.length>2){
+        showBatchResult({title:operation==='move'?'批量移动完成':'批量复制完成',operation,details});
+      }else{
+        notice.value=`${operation==='move'?'已移动':'已复制'} ${items.length} 项`;
+        setTimeout(()=>{notice.value=''},3500);
+      }
+    }catch(e){error.value=e.message||String(e)}
+  });
+}
+async function pasteTransfer(){
+  if(!clipboard.value||mode.value!=='drive')return;
+  const targetId=pathStack.value.at(-1)?.id||'';
+  if(clipboard.value.sourceParentId===targetId){error.value='源目录与目标目录相同';return}
+  const {conflicts,nonConflicts}=detectConflicts(clipboard.value.items,files.value);
+  if(conflicts.length>0){
+    conflictDialog.value={open:true,operation:clipboard.value.operation,conflicts,nonConflicts,targetId,targetName:pathStack.value.at(-1)?.name||'当前目录',loading:false};
+  }else{
+    await executeTransfer(clipboard.value.operation,clipboard.value.items,targetId);
+  }
+}
+async function resolveConflicts(strategy){
+  const {operation,conflicts,nonConflicts,targetId}=conflictDialog.value;
+  conflictDialog.value.loading=true;
+  try{
+    if(strategy==='skip'){
+      conflictDialog.value.open=false;
+      const skippedDetails=conflicts.map(c=>({name:c.source.name,status:'skipped',message:'目标目录存在同名项，已跳过'}));
+      await executeTransfer(operation,nonConflicts,targetId,skippedDetails);
+    }else if(strategy==='overwrite'){
+      conflictDialog.value.open=false;
+      await api.trash(conflicts.map(c=>c.existing.id));
+      const allItems=[...nonConflicts,...conflicts.map(c=>c.source)];
+      const overwriteDetails=conflicts.map(c=>({name:c.source.name,status:'success',message:'已覆盖原有同名项'}));
+      await executeTransfer(operation,allItems,targetId,overwriteDetails);
+    }else if(strategy==='rename'){
+      conflictDialog.value.open=false;
+      const existingNames=files.value.map(f=>f.name),renamedDetails=[],transferredSuccess=[...nonConflicts];
+      for(const c of conflicts){
+        const unique=generateUniqueName(c.source.name,existingNames);
+        existingNames.push(unique);
+        if(operation==='move'){
+          await api.rename({id:c.source.id,name:unique});
+          transferredSuccess.push({...c.source,name:unique});
+          renamedDetails.push({name:`${c.source.name} → ${unique}`,status:'success',message:'已重命名并移动'});
+        }else{
+          await api.rename({id:c.source.id,name:unique});
+          await api.transfer({operation:'copy',ids:[c.source.id],parentId:targetId});
+          await api.rename({id:c.source.id,name:c.source.name});
+          renamedDetails.push({name:`${c.source.name} (副本: ${unique})`,status:'success',message:'已重命名并复制'});
+        }
+      }
+      if(operation==='move')clipboard.value=null;
+      await loadDrive(targetId,pathStack.value.at(-1)?.name,'replace');
+      const details=[...nonConflicts.map(i=>({name:i.name,status:'success',message:operation==='move'?'已剪切并移动':'已复制'})),...renamedDetails];
+      showBatchResult({title:operation==='move'?'批量移动完成':'批量复制完成',operation,details});
+    }
+  }catch(e){error.value=e.message||String(e)}finally{conflictDialog.value.loading=false}
+}
+async function trashSelected(){
+  if(!selectedItems.value.length||!window.confirm(`确定将选中的 ${selectedItems.value.length} 项移入回收站吗？`))return;
+  const count=selectedItems.value.length,items=selectedItems.value.slice();
+  await run(async()=>{
+    await api.trash(items.map(item=>item.id));
+    await loadDrive(pathStack.value.at(-1)?.id||'',pathStack.value.at(-1)?.name,'replace');
+    if(count>2){
+      showBatchResult({title:'批量移入回收站完成',operation:'trash',details:items.map(i=>({name:i.name,status:'success',message:'已移入回收站'}))});
+    }else{
+      notice.value=`已将 ${count} 项移入回收站`;
+      setTimeout(()=>{notice.value=''},3000);
+    }
+  });
+}
+async function restoreSelected(){
+  if(!selectedItems.value.length)return;
+  const count=selectedItems.value.length,items=selectedItems.value.slice();
+  await run(async()=>{
+    await api.restoreTrash(items.map(item=>item.id));
+    await loadTrash();
+    if(count>2){
+      showBatchResult({title:'批量恢复完成',operation:'restore',details:items.map(i=>({name:i.name,status:'success',message:'已恢复至网盘'}))});
+    }else{
+      notice.value=`已恢复 ${count} 项`;
+      setTimeout(()=>{notice.value=''},3000);
+    }
+  });
+}
+async function deleteForever(){
+  if(!selectedItems.value.length||!window.confirm(`永久删除选中的 ${selectedItems.value.length} 项？此操作无法撤销。`))return;
+  const count=selectedItems.value.length,items=selectedItems.value.slice();
+  await run(async()=>{
+    await api.deleteTrash(items.map(item=>item.id));
+    await loadTrash();
+    if(count>2){
+      showBatchResult({title:'批量永久删除完成',operation:'delete',details:items.map(i=>({name:i.name,status:'success',message:'已永久删除'}))});
+    }else{
+      notice.value=`已永久删除 ${count} 项`;
+      setTimeout(()=>{notice.value=''},3000);
+    }
+  });
+}
 function navigateCrumb(index){const target=pathStack.value[index];pathStack.value=pathStack.value.slice(0,index+1);if(mode.value==='drive')loadDrive(target.id,target.name,'replace');else if(target.url)loadShare(target.url,target.name,false)}
 function refreshCurrent(){if(mode.value==='drive')loadDrive(pathStack.value.at(-1)?.id,'','replace');else if(mode.value==='share'&&share.value){pathStack.value.pop();loadShare(share.value.url,pathStack.value.at(-1)?.name||'分享目录',false)}}
 watch([mode,pathStack,treeExpanded,treeChildren],persistNavigationState,{deep:true});
@@ -354,6 +499,54 @@ onMounted(async()=>{
         <footer class="share-dialog-actions">
           <button class="soft" @click="confirmSaveShare('')">直接保存到根目录</button>
           <button class="primary" @click="confirmSaveShare(shareSaveDialog.targetId)">保存到当前目录 ({{shareSaveDialog.targetName}})</button>
+        </footer>
+      </section>
+    </div>
+    <div v-if="conflictDialog.open" class="archive-overlay" @click.self="conflictDialog.open=false">
+      <section class="archive-dialog conflict-dialog" role="dialog" aria-modal="true" aria-label="目标重名冲突">
+        <header>
+          <div><small>复制 / 移动重名冲突</small><h2>发现 {{conflictDialog.conflicts.length}} 项同名冲突</h2></div>
+          <button class="remove" title="关闭" @click="conflictDialog.open=false">×</button>
+        </header>
+        <div class="conflict-summary">
+          目标目录「{{conflictDialog.targetName}}」已存在同名项目。请选择冲突处理方式：
+        </div>
+        <div class="archive-list conflict-list">
+          <div v-for="c in conflictDialog.conflicts" :key="c.source.id" class="archive-row conflict-row">
+            <span><i>⚠️</i><b>{{c.source.name}}</b></span>
+            <em>已有同名项</em>
+          </div>
+        </div>
+        <footer class="conflict-dialog-actions">
+          <button class="soft" :disabled="conflictDialog.loading" @click="resolveConflicts('skip')">跳过冲突项</button>
+          <button class="soft" :disabled="conflictDialog.loading" @click="resolveConflicts('rename')">保留两者 (自动重命名)</button>
+          <button class="warn" :disabled="conflictDialog.loading" @click="resolveConflicts('overwrite')">覆盖目标同名项</button>
+          <button class="ghost" :disabled="conflictDialog.loading" @click="conflictDialog.open=false">取消</button>
+        </footer>
+      </section>
+    </div>
+    <div v-if="batchResultModal.open" class="archive-overlay" @click.self="batchResultModal.open=false">
+      <section class="archive-dialog batch-result-dialog" role="dialog" aria-modal="true" :aria-label="batchResultModal.title">
+        <header>
+          <div><small>批量操作明细</small><h2>{{batchResultModal.title}}</h2></div>
+          <button class="remove" title="关闭" @click="batchResultModal.open=false">×</button>
+        </header>
+        <div class="batch-result-stats">
+          <span class="stat-badge stat-success">✓ 成功 {{batchResultModal.successCount}} 项</span>
+          <span v-if="batchResultModal.skipCount" class="stat-badge stat-skip">⚠ 跳过 {{batchResultModal.skipCount}} 项</span>
+          <span v-if="batchResultModal.failCount" class="stat-badge stat-fail">✕ 失败 {{batchResultModal.failCount}} 项</span>
+        </div>
+        <div class="archive-list batch-result-list">
+          <div v-for="(item, idx) in batchResultModal.details" :key="idx" class="archive-row batch-result-row">
+            <span>
+              <i :class="['result-status-icon', item.status]">{{item.status === 'success' ? '✓' : item.status === 'skipped' ? '⚠' : '✕'}}</i>
+              <b>{{item.name}}</b>
+            </span>
+            <em :class="['result-msg', item.status]">{{item.message}}</em>
+          </div>
+        </div>
+        <footer class="batch-result-actions">
+          <button class="primary" @click="batchResultModal.open=false">确定</button>
         </footer>
       </section>
     </div>

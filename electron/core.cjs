@@ -139,4 +139,41 @@ function matchSubtitles(videoName, fileList) {
   return scored.filter(item => item.score > 0).sort((a, b) => b.score - a.score).map(item => item.file);
 }
 
-module.exports = { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, matchSubtitles };
+function detectConflicts(sources, targets) {
+  const targetMap = new Map();
+  for (const t of targets || []) {
+    if (t?.name) targetMap.set(String(t.name).trim().toLowerCase(), t);
+  }
+  const conflicts = [];
+  const nonConflicts = [];
+  for (const s of sources || []) {
+    const key = String(s?.name || '').trim().toLowerCase();
+    if (key && targetMap.has(key)) {
+      conflicts.push({ source: s, existing: targetMap.get(key) });
+    } else if (s) {
+      nonConflicts.push(s);
+    }
+  }
+  return { conflicts, nonConflicts };
+}
+
+function generateUniqueName(name, existingNames) {
+  const existingSet = new Set((existingNames || []).map(n => String(n).trim().toLowerCase()));
+  const trimmed = String(name || '未命名').trim();
+  if (!existingSet.has(trimmed.toLowerCase())) return trimmed;
+
+  const dotIdx = trimmed.lastIndexOf('.');
+  const hasExt = dotIdx > 0 && dotIdx < trimmed.length - 1;
+  const base = hasExt ? trimmed.slice(0, dotIdx) : trimmed;
+  const ext = hasExt ? trimmed.slice(dotIdx) : '';
+
+  let candidate = `${base} - 副本${ext}`;
+  let count = 2;
+  while (existingSet.has(candidate.toLowerCase())) {
+    candidate = `${base} - 副本 (${count})${ext}`;
+    count++;
+  }
+  return candidate;
+}
+
+module.exports = { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, matchSubtitles, detectConflicts, generateUniqueName };
