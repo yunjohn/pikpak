@@ -58,11 +58,11 @@ describe('image viewer',()=>{
     await new Promise(resolve=>setTimeout(resolve,0));
     expect(dom.window.document.querySelector('select[title="播放速度"]')).not.toBeNull();
     expect([...dom.window.document.querySelector('select[title="播放速度"]').options].map(option=>option.textContent)).toEqual(['0.5×','0.75×','1×','1.25×','1.5×','2×']);
-    expect([...dom.window.document.querySelectorAll('.video-tools button')].map(button=>button.textContent)).toEqual(['字幕','截图']);
+    expect([...dom.window.document.querySelectorAll('.video-tools > button')].map(button=>button.textContent)).toEqual(['字幕','画中画','截图']);
     dom.window.document.querySelector('.video-tools button').click();
     await new Promise(resolve=>setTimeout(resolve,0));
     expect(dom.window.document.querySelector('track').src).toBe('blob:subtitle');
-    expect(dom.window.document.querySelectorAll('.video-tools button')[1].click());
+    expect(dom.window.document.querySelectorAll('.video-tools > button')[2].click());
     await new Promise(resolve=>setTimeout(resolve,0));
     expect(captured).toBe(true);
 
@@ -87,10 +87,17 @@ describe('image viewer',()=>{
     dom.window.HTMLMediaElement.prototype.pause=()=>{pauseCalls++};
     dom.window.HTMLMediaElement.prototype.load=()=>{};
     dom.window.HTMLMediaElement.prototype.play=()=>{playCalls++;return Promise.resolve()};
+    dom.window.localStorage.setItem('pikpak-viewer-video-preferences-v1',JSON.stringify({rate:1.25,volume:.4,muted:true,fit:'cover'}));
+    let pipCalls=0;
+    dom.window.HTMLVideoElement.prototype.requestPictureInPicture=async()=>{pipCalls++};
     dom.window.viewerPayload={get:async()=>({url:'https://example.test/720.mp4',name:'电影.mp4',kind:'video',fileId:'movie',sources:[{url:'https://example.test/720.mp4',label:'720P'},{url:'https://example.test/1080.mp4',label:'1080P'}],items:[]})};
     dom.window.eval(fs.readFileSync(new URL('../electron/viewer.js',import.meta.url),'utf8'));
     await new Promise(resolve=>setTimeout(resolve,0));
     const video=dom.window.document.querySelector('video'),quality=dom.window.document.querySelector('select[title="清晰度"]'),speed=dom.window.document.querySelector('select[title="播放速度"]');
+    expect(video.playbackRate).toBe(1.25);
+    expect(video.volume).toBe(.4);
+    expect(video.muted).toBe(true);
+    expect(video.style.objectFit).toBe('cover');
     Object.defineProperty(video,'duration',{configurable:true,value:120});
     Object.defineProperty(video,'paused',{configurable:true,value:false});
     video.currentTime=42;video.volume=.5;
@@ -103,7 +110,14 @@ describe('image viewer',()=>{
     dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'ArrowRight'}));
     expect(video.currentTime).toBe(47);
     dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'m'}));
-    expect(video.muted).toBe(true);
+    expect(video.muted).toBe(false);
+    dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'p'}));
+    await new Promise(resolve=>setTimeout(resolve,0));
+    expect(pipCalls).toBe(1);
+    const fit=dom.window.document.querySelector('select[title="画面适配"]');
+    fit.value='fill';fit.dispatchEvent(new dom.window.Event('change'));
+    expect(video.style.objectFit).toBe('fill');
+    expect(JSON.parse(dom.window.localStorage.getItem('pikpak-viewer-video-preferences-v1')).fit).toBe('fill');
     expect(pauseCalls).toBeGreaterThan(0);
     dom.window.close();
   });
