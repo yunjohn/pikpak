@@ -76,20 +76,59 @@ async function hydrateFile(item){
 async function openItem(item){if(item.kind==='pikpak#share'){selected.value=item;selectedIds.value=[item.id];await copyMyShare();return}if(item.kind==='drive#folder'){if(mode.value==='search'){pathStack.value=[{id:'',name:'全部文件'},{id:item.id,name:item.name}];await loadDrive(item.id,item.name,'replace')}else if(['drive','starred','recent'].includes(mode.value)){await loadDrive(item.id,item.name)}else if(item.encodedToken){const url=new URL(share.value.url);const parts=url.pathname.split('/').filter(Boolean),index=parts.indexOf('s');url.pathname='/'+parts.slice(0,index+2).concat(item.encodedToken).join('/');await loadShare(url.href,item.name,false)}else{error.value='该目录没有可用的进入 token，请刷新后重试'}return}selected.value=item;selectedIds.value=[item.id];await openSelected()}
 async function selectItem(item,event){const additive=!!(event?.ctrlKey||event?.metaKey);if(additive){selectedIds.value=selectedIds.value.includes(item.id)?selectedIds.value.filter(id=>id!==item.id):[...selectedIds.value,item.id];selected.value=selectedIds.value.includes(item.id)?item:(selectedItems.value.at(-1)||null)}else{selectedIds.value=[item.id];selected.value=item}if(selected.value?.id===item.id)await hydrateFile(item)}
 async function downloadSelected(){
-  const targetFiles=selectedItems.value.filter(item=>item.kind!=='drive#folder');
-  if(!targetFiles.length)return;
+  if(!selectedItems.value.length)return;
   let started=0;
-  for(const rawItem of targetFiles){
-    const item=await hydrateFile(rawItem);
-    const url=contentUrl(item);
-    if(url){
-      const task=await api.startDownload({url,name:item.name});
-      upsertDownload(task);
-      started++;
+  for(const rawRoot of selectedItems.value){
+    if(rawRoot.kind==='drive#folder'){
+      const queue=[{id:rawRoot.id,relDir:rawRoot.name,encodedToken:rawRoot.encodedToken||''}];
+      while(queue.length){
+        const current=queue.shift();
+        try{
+          let children=[];
+          if(mode.value==='share'&&share.value?.url){
+            const url=new URL(share.value.url);
+            const parts=url.pathname.split('/').filter(Boolean),index=parts.indexOf('s');
+            if(current.encodedToken){
+              url.pathname='/'+parts.slice(0,index+2).concat(current.encodedToken).join('/');
+            }
+            const res=await api.openShare(url.href);
+            children=res.files||[];
+          }else{
+            const res=await api.listDrive(current.id);
+            children=res.files||[];
+          }
+          for(const child of children){
+            if(child.kind==='drive#folder'){
+              queue.push({id:child.id,relDir:`${current.relDir}/${child.name}`,encodedToken:child.encodedToken||''});
+            }else{
+              const item=await hydrateFile(child);
+              const url=contentUrl(item);
+              if(url){
+                const task=await api.startDownload({url,name:item.name,subDir:current.relDir});
+                upsertDownload(task);
+                started++;
+              }
+            }
+          }
+        }catch(e){
+          error.value=`读取目录“${current.relDir}”失败: `+(e.message||String(e));
+        }
+      }
+    }else{
+      const item=await hydrateFile(rawRoot);
+      const url=contentUrl(item);
+      if(url){
+        const task=await api.startDownload({url,name:item.name,subDir:''});
+        upsertDownload(task);
+        started++;
+      }
     }
   }
-  if(!started)error.value='选中文件没有可用下载地址';
-  else mode.value='downloads';
+  if(!started){
+    if(!error.value)error.value='选中项中没有可用下载内容或为空文件夹';
+  }else{
+    mode.value='downloads';
+  }
 }
 async function loadArchivePath(pathValue='',nodes=[]){const state=archive.value;if(!state.request)return;state.loading=true;state.error='';state.items=[];try{let result=await api.listArchive({...state.request,path:pathValue,password:state.password});if(result.passwordRequired){const password=window.prompt(result.message||'请输入压缩包密码');if(password===null){if(!state.items.length)state.open=false;return}state.password=password;result=await api.listArchive({...state.request,path:pathValue,password});if(result.passwordRequired)throw new Error('压缩包密码不正确')}state.items=result.items||[];state.path=pathValue;state.nodes=nodes}catch(e){state.error=e.message||String(e)}finally{state.loading=false}}
 async function openArchive(item){archive.value={open:true,name:item.name,items:[],path:'',nodes:[{name:'全部',path:''}],password:'',loading:false,error:'',request:{scope:mode.value==='share'?'share':'drive',fileId:item.id,shareId:share.value?.shareId||'',passCodeToken:share.value?.passCodeToken||''}};await loadArchivePath('',archive.value.nodes)}
@@ -168,6 +207,7 @@ onMounted(async()=>{
   [downloads.value,uploads.value,settings.value]=await Promise.all([api.listDownloads(),api.listUploads(),api.getSettings()]);
   account.value=await api.getAccount();
   if(account.value.connected){restoreNavigationState();refreshQuota();resumeDrive()}else{resetNavigationState()}
+  window.addEventListener('keydown',e=>{if(e.key==='Escape'&&selectedIds.value.length)clearSelection()});
 })
 </script>
 
@@ -199,7 +239,39 @@ onMounted(async()=>{
       <header class="toolbar">
         <div class="toolbar-top">
           <div class="toolbar-heading"><h1 :title="title">{{title}}</h1></div>
-          <div class="toolbar-actions"><input v-if="['drive','starred','recent','myshares','trash'].includes(mode)||(mode==='share'&&share)" v-model="query" class="search" placeholder="搜索当前目录"><button v-if="selectedItems.some(item=>item.kind!=='drive#folder')&&!['trash','myshares'].includes(mode)" class="soft" @click="downloadSelected">↓ 下载 ({{selectedItems.filter(item=>item.kind!=='drive#folder').length}})</button><button v-if="mode==='drive'&&clipboard" class="paste" @click="pasteTransfer">粘贴 {{clipboard.items.length}} 项</button><button v-if="mode==='drive'&&account.connected" class="primary" @click="chooseUpload">↑ 上传文件</button><button v-if="mode==='drive'&&account.connected" class="soft" @click="chooseUploadFolder">↑ 上传文件夹</button><button v-if="mode==='drive'&&account.connected" class="soft" @click="createFolder">＋ 新建文件夹</button><button v-if="!['uploads','downloads','trash','offline','starred','recent','myshares'].includes(mode)" class="soft" @click="refreshCurrent">↻ 刷新</button><button v-if="mode==='starred'" class="soft" @click="loadStarred">↻ 刷新</button><button v-if="mode==='recent'" class="soft" @click="loadRecent">↻ 刷新</button><button v-if="mode==='myshares'" class="soft" @click="loadMyShares">↻ 刷新</button><button v-if="mode==='trash'" class="soft" @click="loadTrash">↻ 刷新</button><button v-if="mode==='offline'" class="soft" @click="loadOffline">↻ 刷新</button><button v-if="mode==='uploads'&&uploads.some(task=>['completed','failed','cancelled'].includes(task.state))" class="soft" @click="clearFinishedUploads">清理记录</button><button v-if="mode==='downloads'&&downloads.length" class="soft" @click="clearDownloadHistory">清理记录</button><button class="primary" @click="mode='share';share=null;files=[];clearSelection()">＋ 打开分享</button></div>
+          <div class="toolbar-actions">
+            <template v-if="selectedItems.length > 1">
+              <span class="batch-count">已选 {{selectedItems.length}} 项</span>
+              <button v-if="!['trash','myshares'].includes(mode)" class="soft" @click="downloadSelected">↓ 批量下载 ({{selectedItems.length}})</button>
+              <button v-if="['drive','starred','recent','search'].includes(mode)" class="soft" @click="toggleStarred">{{selectedItems.some(item=>!itemIsStarred(item))?'★ 批量收藏':'批量取消收藏'}} ({{selectedItems.length}})</button>
+              <button v-if="['drive','starred','recent','search'].includes(mode)" class="soft" @click="createShareSelected">🔗 批量分享 ({{selectedItems.length}})</button>
+              <button v-if="mode==='drive'" class="soft" @click="stageTransfer('copy')">📋 批量复制</button>
+              <button v-if="mode==='drive'" class="soft" @click="stageTransfer('move')">✂ 批量剪切</button>
+              <button v-if="mode==='drive'" class="warn" @click="trashSelected">🗑 移入回收站 ({{selectedItems.length}})</button>
+              <button v-if="mode==='trash'" class="soft" @click="restoreSelected">↶ 批量恢复 ({{selectedItems.length}})</button>
+              <button v-if="mode==='trash'" class="warn" @click="deleteForever">🗑 永久删除 ({{selectedItems.length}})</button>
+              <button v-if="mode==='share'&&share" class="accent" @click="saveShareSelected">💾 保存到网盘 ({{selectedItems.length}})</button>
+              <button v-if="mode==='myshares'" class="warn" @click="cancelMyShares">批量取消分享 ({{selectedItems.length}})</button>
+              <button class="soft" title="取消选择" @click="clearSelection">✕ 取消选择</button>
+            </template>
+            <template v-else>
+              <input v-if="['drive','starred','recent','myshares','trash'].includes(mode)||(mode==='share'&&share)" v-model="query" class="search" placeholder="搜索当前目录">
+              <button v-if="selectedItems.length===1&&!['trash','myshares'].includes(mode)" class="soft" @click="downloadSelected">↓ 下载</button>
+              <button v-if="mode==='drive'&&clipboard" class="paste" @click="pasteTransfer">粘贴 {{clipboard.items.length}} 项</button>
+              <button v-if="mode==='drive'&&account.connected" class="primary" @click="chooseUpload">↑ 上传文件</button>
+              <button v-if="mode==='drive'&&account.connected" class="soft" @click="chooseUploadFolder">↑ 上传文件夹</button>
+              <button v-if="mode==='drive'&&account.connected" class="soft" @click="createFolder">＋ 新建文件夹</button>
+              <button v-if="!['uploads','downloads','trash','offline','starred','recent','myshares'].includes(mode)" class="soft" @click="refreshCurrent">↻ 刷新</button>
+              <button v-if="mode==='starred'" class="soft" @click="loadStarred">↻ 刷新</button>
+              <button v-if="mode==='recent'" class="soft" @click="loadRecent">↻ 刷新</button>
+              <button v-if="mode==='myshares'" class="soft" @click="loadMyShares">↻ 刷新</button>
+              <button v-if="mode==='trash'" class="soft" @click="loadTrash">↻ 刷新</button>
+              <button v-if="mode==='offline'" class="soft" @click="loadOffline">↻ 刷新</button>
+              <button v-if="mode==='uploads'&&uploads.some(task=>['completed','failed','cancelled'].includes(task.state))" class="soft" @click="clearFinishedUploads">清理记录</button>
+              <button v-if="mode==='downloads'&&downloads.length" class="soft" @click="clearDownloadHistory">清理记录</button>
+              <button class="primary" @click="mode='share';share=null;files=[];clearSelection()">＋ 打开分享</button>
+            </template>
+          </div>
         </div>
         <div class="toolbar-sub">
           <div class="crumbs"><template v-for="(part,i) in pathStack" :key="part.id"><button class="crumb-btn" :title="part.name" @click="navigateCrumb(i)">{{part.name}}</button><span v-if="i<pathStack.length-1" class="crumb-sep">›</span></template></div>
@@ -216,7 +288,7 @@ onMounted(async()=>{
       <section v-else-if="mode==='downloads'" class="downloads-panel">
         <div v-if="!downloads.length" class="state">暂无下载任务</div>
         <article v-for="task in downloads" :key="task.id" class="download-row">
-          <div class="download-icon">⇩</div><div class="download-info"><b>{{task.name}}</b><div class="progress"><i :style="{width:(task.percent||0)+'%'}"></i></div><small :class="{error:task.state==='failed'}">{{task.state==='completed'?'下载完成':task.state==='cancelled'?'已取消':task.state==='interrupted'?'下载中断':task.state==='failed'?'下载失败':`${task.percent||0}% · ${size(task.received)} / ${size(task.total)}`}}<template v-if="task.error"> · {{task.error}}</template></small></div>
+          <div class="download-icon">⇩</div><div class="download-info"><b>{{task.name}}<small v-if="task.subDir" class="download-subdir"> ({{task.subDir}})</small></b><div class="progress"><i :style="{width:(task.percent||0)+'%'}"></i></div><small :class="{error:task.state==='failed'}">{{task.state==='completed'?'下载完成':task.state==='cancelled'?'已取消':task.state==='interrupted'?'下载中断':task.state==='failed'?'下载失败':`${task.percent||0}% · ${size(task.received)} / ${size(task.total)}`}}<template v-if="task.error"> · {{task.error}}</template></small></div>
           <div class="download-actions"><button v-if="task.state==='completed'" class="soft" @click="api.showDownload(task.path)">定位</button><button v-if="['failed','cancelled','interrupted'].includes(task.state)" class="soft" @click="retryDownloadTask(task.id)">重试</button><button v-else-if="!['cancelled','interrupted','failed'].includes(task.state)" class="soft" @click="api.cancelDownload(task.id)">取消</button><button v-if="!['queued','progress'].includes(task.state)" class="remove" title="移除记录" @click="removeDownload(task.id)">×</button></div>
         </article>
       </section>
@@ -250,7 +322,7 @@ onMounted(async()=>{
           <div v-if="loading" class="state">正在加载…</div><div v-else-if="error" class="state error">{{error}}</div><div v-else-if="!files.length" class="state">这个目录是空的</div>
           <div v-for="item in visibleFiles" :key="item.id" :class="['file-row',{selected:selectedIds.includes(item.id)}]" role="button" tabindex="0" :title="item.kind==='drive#folder'?'双击进入文件夹':canPreview(item)?'双击打开':'此类型需明确点击下载按钮后在本机打开'" @click="selectItem(item,$event)" @dblclick="openItem(item)" @keydown.enter="openItem(item)">
             <span class="file-name"><i class="row-check">{{selectedIds.includes(item.id)?'✓':''}}</i><span class="file-visual"><img v-if="item.thumbnail_link&&!thumbFailed[item.id]&&item.kind!=='drive#folder'" :src="item.thumbnail_link" alt="" loading="lazy" @error="markThumbFailed(item)"><i v-else>{{icon(item)}}</i></span><span><b>{{item.name}}</b><small>{{item._search_path||item.mime_type||item.kind}}</small></span></span><span>{{size(item.size)}}</span><span>{{item.modified_time?new Date(item.modified_time).toLocaleString():'—'}}</span>
-            <span class="row-actions"><button v-if="item.kind!=='drive#folder'&&canPreview(item)" @click.stop="itemAction(item,'open')">打开</button><button v-if="item.kind!=='drive#folder'&&!['trash','myshares'].includes(mode)" @click.stop="itemAction(item,'download')">下载</button><button v-if="mode==='share'" class="accent" @click.stop="itemAction(item,'save')">保存</button><button v-if="['drive','starred','recent','search'].includes(mode)" @click.stop="itemAction(item,'share')">分享</button><button v-if="['drive','starred','recent','search'].includes(mode)" @click.stop="itemAction(item,'star')">{{itemIsStarred(item)?'取消收藏':'收藏'}}</button><template v-if="mode==='drive'"><button @click.stop="itemAction(item,'copy')">复制</button><button @click.stop="itemAction(item,'move')">剪切</button><button @click.stop="itemAction(item,'rename')">重命名</button><button class="warn" @click.stop="itemAction(item,'trash')">回收站</button></template><template v-if="mode==='trash'"><button @click.stop="itemAction(item,'restore')">恢复</button><button class="warn" @click.stop="itemAction(item,'delete')">删除</button></template><template v-if="mode==='myshares'"><button @click.stop="itemAction(item,'copyShare')">复制链接</button><button class="warn" @click.stop="itemAction(item,'cancelShare')">取消分享</button></template></span>
+            <span class="row-actions"><button v-if="item.kind!=='drive#folder'&&canPreview(item)" @click.stop="itemAction(item,'open')">打开</button><button v-if="!['trash','myshares'].includes(mode)" @click.stop="itemAction(item,'download')">下载</button><button v-if="mode==='share'" class="accent" @click.stop="itemAction(item,'save')">保存</button><button v-if="['drive','starred','recent','search'].includes(mode)" @click.stop="itemAction(item,'share')">分享</button><button v-if="['drive','starred','recent','search'].includes(mode)" @click.stop="itemAction(item,'star')">{{itemIsStarred(item)?'取消收藏':'收藏'}}</button><template v-if="mode==='drive'"><button @click.stop="itemAction(item,'copy')">复制</button><button @click.stop="itemAction(item,'move')">剪切</button><button @click.stop="itemAction(item,'rename')">重命名</button><button class="warn" @click.stop="itemAction(item,'trash')">回收站</button></template><template v-if="mode==='trash'"><button @click.stop="itemAction(item,'restore')">恢复</button><button class="warn" @click.stop="itemAction(item,'delete')">删除</button></template><template v-if="mode==='myshares'"><button @click.stop="itemAction(item,'copyShare')">复制链接</button><button class="warn" @click.stop="itemAction(item,'cancelShare')">取消分享</button></template></span>
           </div>
         </div>
       </section>

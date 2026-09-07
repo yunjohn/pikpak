@@ -2,7 +2,7 @@ const { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, session, sh
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
-const { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, archiveItemsFrom, archiveAccessToken } = require('./core.cjs');
+const { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, archiveItemsFrom, archiveAccessToken, sanitizeSubDir } = require('./core.cjs');
 const { logger } = require('./logger.cjs');
 
 process.on('uncaughtException', err => logger.error('process', 'Uncaught exception', err?.stack || err));
@@ -142,9 +142,12 @@ function settingsPath(){return path.join(app.getPath('userData'),'settings.json'
 function normalizeSettings(value={}){const directory=String(value.downloadDirectory||'');return {downloadDirectory:directory&&fs.existsSync(directory)?directory:'',downloadConcurrency:Math.max(1,Math.min(8,Math.round(Number(value.downloadConcurrency)||3))),uploadConcurrency:Math.max(1,Math.min(8,Math.round(Number(value.uploadConcurrency)||3)))}}
 function loadSettings(){try{settings=normalizeSettings(JSON.parse(fs.readFileSync(settingsPath(),'utf8')))}catch{settings=normalizeSettings()}}
 function saveSettings(){const target=settingsPath();fs.mkdirSync(path.dirname(target),{recursive:true});fs.writeFileSync(target,JSON.stringify(settings,null,2))}
-function uniqueDownloadPath(name) {
+function uniqueDownloadPath(name, subDir = '') {
   const parsed=path.parse(safeFilename(name));
-  const directory=settings.downloadDirectory||app.getPath('downloads');
+  const baseDir=settings.downloadDirectory||app.getPath('downloads');
+  const sanitized=sanitizeSubDir(subDir);
+  const directory=sanitized?path.join(baseDir,...sanitized.split('/')):baseDir;
+  fs.mkdirSync(directory,{recursive:true});
   let candidate=path.join(directory,parsed.base), index=1;
   while(fs.existsSync(candidate)){candidate=path.join(directory,`${parsed.name} (${index++})${parsed.ext}`)}
   return candidate;
@@ -189,10 +192,10 @@ function installDownloadManager() {
   session.defaultSession.on('will-download',(_event,item)=>{
     const pending=pendingDownloads.shift();
     if(pending?.timer)clearTimeout(pending.timer);
-    const request=pending?.task || {id:crypto.randomUUID(),name:item.getFilename()};
-    const savePath=uniqueDownloadPath(request.name || item.getFilename());
+    const request=pending?.task || {id:crypto.randomUUID(),name:item.getFilename(),subDir:''};
+    const savePath=uniqueDownloadPath(request.name || item.getFilename(), request.subDir || '');
     item.setSavePath(savePath); downloadItems.set(request.id,item);
-    const snapshot=(state,error='')=>({id:request.id,name:path.basename(savePath),url:request.url||'',path:savePath,state,error,received:item.getReceivedBytes(),total:item.getTotalBytes(),percent:item.getTotalBytes()>0?Math.round(item.getReceivedBytes()/item.getTotalBytes()*100):0});
+    const snapshot=(state,error='')=>({id:request.id,name:path.basename(savePath),subDir:request.subDir||'',url:request.url||'',path:savePath,state,error,received:item.getReceivedBytes(),total:item.getTotalBytes(),percent:item.getTotalBytes()>0?Math.round(item.getReceivedBytes()/item.getTotalBytes()*100):0});
     emitDownload(snapshot('progress'));
     item.on('updated',(_e,state)=>emitDownload(snapshot(state==='interrupted'?'interrupted':'progress')));
     item.once('done',(_e,state)=>{downloadItems.delete(request.id);activeDownloads=Math.max(0,activeDownloads-1);emitDownload(snapshot(state,state==='interrupted'?'下载中断':''));scheduleDownloads()});
@@ -484,11 +487,11 @@ ipcMain.handle('trash:list',async()=>{
 });
 ipcMain.handle('trash:restore',(_,ids)=>driveMutation('/drive/v1/files:batchUntrash',{body:{ids:normalizeIds(ids)}}));
 ipcMain.handle('trash:delete',(_,ids)=>driveMutation('/drive/v1/files:batchDelete',{body:{ids:normalizeIds(ids)}}));
-ipcMain.handle('download:start',(_,{url,name})=>{
+ipcMain.handle('download:start',(_,{url,name,subDir=''})=>{
   if(!/^https?:\/\//i.test(String(url||'')))throw new Error('无效的下载地址');
   if(!mainWindow||mainWindow.isDestroyed())throw new Error('主窗口不可用');
-  const task={id:crypto.randomUUID(),name:safeFilename(name),url:String(url),state:'queued',received:0,total:0,percent:0};
-  logger.info('download','Download task queued',{id:task.id,name:task.name});
+  const task={id:crypto.randomUUID(),name:safeFilename(name),subDir:sanitizeSubDir(subDir),url:String(url),state:'queued',received:0,total:0,percent:0};
+  logger.info('download','Download task queued',{id:task.id,name:task.name,subDir:task.subDir});
   downloadQueue.push({task,url});emitDownload(task);scheduleDownloads();return task;
 });
 ipcMain.handle('settings:get',()=>({...settings,effectiveDownloadDirectory:settings.downloadDirectory||app.getPath('downloads')}));
@@ -554,8 +557,8 @@ ipcMain.handle('download:retry',(_,id)=>{
   if(!mainWindow||mainWindow.isDestroyed())throw new Error('主窗口不可用');
   const alreadyQueued=downloadQueue.some(entry=>entry.task.id===id);
   if(alreadyQueued)return existing;
-  const task={id,name:existing.name,url:existing.url,state:'queued',received:0,total:existing.total||0,percent:0};
-  logger.info('download','Download task retried',{id:task.id,name:task.name});
+  const task={id,name:existing.name,subDir:existing.subDir||'',url:existing.url,state:'queued',received:0,total:existing.total||0,percent:0};
+  logger.info('download','Download task retried',{id:task.id,name:task.name,subDir:task.subDir});
   downloadQueue.push({task,url:existing.url});
   emitDownload(task);
   scheduleDownloads();
