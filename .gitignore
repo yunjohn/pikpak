@@ -1,0 +1,24 @@
+node_modules/
+dist/
+release/
+
+# Local handoff and diagnostic artifacts
+开发交接文档.md
+*.log
+*.png.error.txt
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+account.bin
+downloads.json
+uploads.json
+playback.json
+settings.json

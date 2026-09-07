@@ -1,0 +1,11 @@
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('viewerProgress', {
+  get: fileId => ipcRenderer.invoke('viewer:progress-get', fileId),
+  set: payload => ipcRenderer.invoke('viewer:progress-set', payload)
+});
+contextBridge.exposeInMainWorld('viewerPayload', {
+  get: token => ipcRenderer.invoke('viewer:payload-get', token),
+  chooseSubtitle: () => ipcRenderer.invoke('viewer:subtitle-choose'),
+  capture: payload => ipcRenderer.invoke('viewer:capture', payload)
+});
