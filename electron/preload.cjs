@@ -41,6 +41,8 @@ contextBridge.exposeInMainWorld('pikpak', {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   chooseDownloadDirectory: () => ipcRenderer.invoke('settings:choose-download-dir'),
   saveSettings: value => ipcRenderer.invoke('settings:set', value),
+  resetSettings: () => ipcRenderer.invoke('settings:reset'),
+  exportDiagnostics: () => ipcRenderer.invoke('app:export-diagnostics'),
   onUpload: callback => { const listener=(_event,value)=>callback(value); ipcRenderer.on('upload:event',listener); return ()=>ipcRenderer.removeListener('upload:event',listener); },
   openViewer: payload => ipcRenderer.invoke('viewer:open', payload),
   listArchive: payload => ipcRenderer.invoke('archive:list', payload),

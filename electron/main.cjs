@@ -3,8 +3,12 @@ const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, archiveItemsFrom, archiveAccessToken } = require('./core.cjs');
+const { logger } = require('./logger.cjs');
 
-const isDev = !app.isPackaged;
+process.on('uncaughtException', err => logger.error('process', 'Uncaught exception', err?.stack || err));
+process.on('unhandledRejection', reason => logger.error('process', 'Unhandled rejection', reason?.stack || reason));
+
+const isDev = !app.isPackaged && process.env.NODE_ENV !== 'production' && !process.env.PIKPAK_PROD;
 
 let deviceId = crypto.randomBytes(16).toString('hex');
 let captcha = { token: '', expiresAt: 0, action: '' };
@@ -68,10 +72,13 @@ async function apiRequest(url, { action, method='GET', body, authorization='', r
   const response = await fetch(url, { method, headers, body:body ? JSON.stringify(body) : undefined });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
+    logger.warn('api', `API request failed (${response.status})`, { path: new URL(url).pathname, status: response.status, error: data.error_description || data.error });
     if(authorization&&retryAuth&&(response.status===401||response.status===403)){
+      logger.info('auth', 'Attempting auth refresh for expired credentials');
       const refreshed=await refreshOfficialAuth();
       if(refreshed){const next=readAccount().accessToken;return apiRequest(url,{action,method,body,authorization:next,retryAuth:false})}
       clearAccount();if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('account:expired');
+      logger.warn('auth', 'Auth refresh failed, session expired');
       throw new Error('登录状态已过期，请重新登录 PikPak');
     }
     const error=new Error(data.error_description || data.error || `请求失败 (${response.status})`);error.status=response.status;error.data=data;throw error;
@@ -160,10 +167,29 @@ function emitDownload(task) {
   const saved=rememberDownload(task);
   if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('download:event',saved);
 }
-function scheduleDownloads(){while(activeDownloads<settings.downloadConcurrency&&downloadQueue.length&&mainWindow&&!mainWindow.isDestroyed()){const entry=downloadQueue.shift();activeDownloads++;pendingDownloads.push(entry.task);mainWindow.webContents.downloadURL(entry.url)}}
+function scheduleDownloads(){
+  while(activeDownloads<settings.downloadConcurrency&&downloadQueue.length&&mainWindow&&!mainWindow.isDestroyed()){
+    const entry=downloadQueue.shift();
+    activeDownloads++;
+    const timer=setTimeout(()=>{
+      const idx=pendingDownloads.findIndex(p=>p.task.id===entry.task.id);
+      if(idx>=0){
+        pendingDownloads.splice(idx,1);
+        activeDownloads=Math.max(0,activeDownloads-1);
+        logger.warn('download','Download initiation timed out',{id:entry.task.id,name:entry.task.name});
+        emitDownload({id:entry.task.id,name:entry.task.name,state:'failed',error:'下载启动超时，请重试',received:0,total:0,percent:0});
+        scheduleDownloads();
+      }
+    },10000);
+    pendingDownloads.push({task:entry.task,timer});
+    mainWindow.webContents.downloadURL(entry.url);
+  }
+}
 function installDownloadManager() {
   session.defaultSession.on('will-download',(_event,item)=>{
-    const request=pendingDownloads.shift() || {id:crypto.randomUUID(),name:item.getFilename()};
+    const pending=pendingDownloads.shift();
+    if(pending?.timer)clearTimeout(pending.timer);
+    const request=pending?.task || {id:crypto.randomUUID(),name:item.getFilename()};
     const savePath=uniqueDownloadPath(request.name || item.getFilename());
     item.setSavePath(savePath); downloadItems.set(request.id,item);
     const snapshot=(state,error='')=>({id:request.id,name:path.basename(savePath),path:savePath,state,error,received:item.getReceivedBytes(),total:item.getTotalBytes(),percent:item.getTotalBytes()>0?Math.round(item.getReceivedBytes()/item.getTotalBytes()*100):0});
@@ -176,9 +202,9 @@ function installDownloadManager() {
 function uploadsPath(){return path.join(app.getPath('userData'),'uploads.json')}
 function playbackPath(){return path.join(app.getPath('userData'),'playback.json')}
 function loadPlaybackHistory(){try{const value=JSON.parse(fs.readFileSync(playbackPath(),'utf8'));playbackHistory=value&&typeof value==='object'&&!Array.isArray(value)?value:{}}catch{playbackHistory={}}}
-function flushPlaybackHistory(){try{const entries=Object.entries(playbackHistory).sort((a,b)=>Number(b[1]?.updatedAt||0)-Number(a[1]?.updatedAt||0)).slice(0,1000);playbackHistory=Object.fromEntries(entries);const target=playbackPath();fs.mkdirSync(path.dirname(target),{recursive:true});fs.writeFileSync(target,JSON.stringify(playbackHistory,null,2))}catch(error){console.warn('Failed to save playback history',error)}}
+function flushPlaybackHistory(){try{const entries=Object.entries(playbackHistory).sort((a,b)=>Number(b[1]?.updatedAt||0)-Number(a[1]?.updatedAt||0)).slice(0,1000);playbackHistory=Object.fromEntries(entries);const target=playbackPath();fs.mkdirSync(path.dirname(target),{recursive:true});fs.writeFileSync(target,JSON.stringify(playbackHistory,null,2))}catch(error){logger.warn('playback','Failed to save playback history',error)}}
 function loadUploadHistory(){try{uploadHistory=JSON.parse(fs.readFileSync(uploadsPath(),'utf8'));if(!Array.isArray(uploadHistory))uploadHistory=[]}catch{uploadHistory=[]}uploadHistory=uploadHistory.slice(0,200).map(task=>['queued','hashing','uploading'].includes(task.state)?{...task,state:'interrupted',error:'应用上次退出时上传尚未完成'}:task)}
-function flushUploadHistory(){try{const target=uploadsPath();fs.mkdirSync(path.dirname(target),{recursive:true});fs.writeFileSync(target,JSON.stringify(uploadHistory.slice(0,200),null,2))}catch(error){console.warn('Failed to save upload history',error)}}
+function flushUploadHistory(){try{const target=uploadsPath();fs.mkdirSync(path.dirname(target),{recursive:true});fs.writeFileSync(target,JSON.stringify(uploadHistory.slice(0,200),null,2))}catch(error){logger.warn('upload','Failed to save upload history',error)}}
 function rememberUpload(value){const index=uploadHistory.findIndex(item=>item.id===value.id),saved={...(index>=0?uploadHistory[index]:{}),...value,updatedAt:Date.now()};if(index>=0)uploadHistory.splice(index,1);uploadHistory.unshift(saved);uploadHistory=uploadHistory.slice(0,200);clearTimeout(uploadSaveTimer);uploadSaveTimer=setTimeout(flushUploadHistory,300);return saved}
 function uploadEvent(value){const saved=rememberUpload(value);if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('upload:event',saved)}
 function sha1(value){return crypto.createHash('sha1').update(value).digest()}
@@ -217,7 +243,7 @@ async function startLocalUpload(filePath,parentId='',id=crypto.randomUUID()){
   }catch(error){emit(error.name==='AbortError'?'cancelled':'failed',0,error.name==='AbortError'?'已取消':error.message);throw error}finally{uploadControllers.delete(id)}
 }
 function scheduleUploads(){while(activeUploads<settings.uploadConcurrency&&uploadQueue.length){const entry=uploadQueue.shift();activeUploads++;startLocalUpload(entry.filePath,entry.parentId,entry.task.id).catch(()=>{}).finally(()=>{activeUploads--;scheduleUploads()})}}
-function queueUploadFile(filePath,parentId,stat,tasks){const task={id:crypto.randomUUID(),name:path.basename(filePath),size:stat.size,state:'queued',percent:0};tasks.push(task);uploadQueue.push({filePath,parentId,task});uploadEvent(task)}
+function queueUploadFile(filePath,parentId,stat,tasks){const task={id:crypto.randomUUID(),name:path.basename(filePath),size:stat.size,state:'queued',percent:0};logger.info('upload','Upload task queued',{id:task.id,name:task.name,size:stat.size});tasks.push(task);uploadQueue.push({filePath,parentId,task});uploadEvent(task)}
 async function createRemoteFolder(name,parentId){const data=await driveMutation('/drive/v1/files',{body:{kind:'drive#folder',parent_id:parentId||'',name:String(name||'').trim()}}),file=data?.file||data?.data?.file||data;if(!file?.id)throw new Error(`创建远程目录失败：${name}`);return String(file.id)}
 async function enqueueDirectory(localDir,parentId,tasks,counter){
   const remoteId=await createRemoteFolder(path.basename(localDir),parentId),entries=await fs.promises.readdir(localDir,{withFileTypes:true});counter.dirs++;
@@ -391,11 +417,14 @@ ipcMain.handle('download:start',(_,{url,name})=>{
   if(!/^https?:\/\//i.test(String(url||'')))throw new Error('无效的下载地址');
   if(!mainWindow||mainWindow.isDestroyed())throw new Error('主窗口不可用');
   const task={id:crypto.randomUUID(),name:safeFilename(name),state:'queued',received:0,total:0,percent:0};
+  logger.info('download','Download task queued',{id:task.id,name:task.name});
   downloadQueue.push({task,url});emitDownload(task);scheduleDownloads();return task;
 });
 ipcMain.handle('settings:get',()=>({...settings,effectiveDownloadDirectory:settings.downloadDirectory||app.getPath('downloads')}));
 ipcMain.handle('settings:choose-download-dir',async()=>{const picked=await dialog.showOpenDialog(mainWindow||undefined,{title:'选择默认下载目录',properties:['openDirectory','createDirectory']});return picked.canceled?'':picked.filePaths[0]||''});
 ipcMain.handle('settings:set',(_,value)=>{settings=normalizeSettings(value);saveSettings();scheduleDownloads();scheduleUploads();return {...settings,effectiveDownloadDirectory:settings.downloadDirectory||app.getPath('downloads')}});
+ipcMain.handle('settings:reset',()=>{settings=normalizeSettings({});saveSettings();logger.info('settings','Settings reset to default');scheduleDownloads();scheduleUploads();return {...settings,effectiveDownloadDirectory:settings.downloadDirectory||app.getPath('downloads')}});
+ipcMain.handle('app:export-diagnostics',async()=>{logger.info('app','Exporting diagnostics report');return logger.buildDiagnostics({appVersion:app.getVersion(),account:accountStatus(),settings:{...settings,effectiveDownloadDirectory:settings.downloadDirectory||app.getPath('downloads')},transferStats:{activeDownloads,queuedDownloads:downloadQueue.length,totalDownloadsRecorded:downloadHistory.length,activeUploads,queuedUploads:uploadQueue.length,totalUploadsRecorded:uploadHistory.length}})});
 ipcMain.handle('upload:choose',async(_,{parentId='' }={})=>{
   if(!readAccount().accessToken)throw new Error('请先连接 PikPak 账户');
   const picked=await dialog.showOpenDialog(mainWindow||undefined,{title:'选择要上传到 PikPak 的文件',properties:['openFile','multiSelections']});if(picked.canceled)return [];
@@ -455,6 +484,6 @@ function createWindow() {
   else win.loadFile(path.join(__dirname,'..','dist','index.html'));
 }
 
-app.whenReady().then(() => { loadSettings();loadDownloadHistory();loadUploadHistory();loadPlaybackHistory();installPikPakSessionCapture(); installDownloadManager(); createWindow(); app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); }); });
+app.whenReady().then(() => { logger.init(app.getPath('userData')); logger.info('app', 'Application ready', { version: app.getVersion() }); loadSettings();loadDownloadHistory();loadUploadHistory();loadPlaybackHistory();installPikPakSessionCapture(); installDownloadManager(); createWindow(); app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); }); });
 app.on('before-quit',()=>{clearTimeout(downloadSaveTimer);clearTimeout(uploadSaveTimer);clearTimeout(playbackSaveTimer);flushDownloadHistory();flushUploadHistory();flushPlaybackHistory()});
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
