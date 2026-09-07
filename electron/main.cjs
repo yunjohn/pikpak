@@ -582,7 +582,13 @@ function createWindow() {
   win.on('closed',()=>{if(mainWindow===win)mainWindow=null});
   if(process.env.PIKPAK_SMOKE_SCREENSHOT){
     win.webContents.once('did-finish-load',()=>setTimeout(async()=>{
-      try{win.show();const image=await win.webContents.capturePage();fs.writeFileSync(process.env.PIKPAK_SMOKE_SCREENSHOT,image.toPNG())}
+      try{
+        if(process.env.PIKPAK_SMOKE_EVAL) {
+          await win.webContents.executeJavaScript(process.env.PIKPAK_SMOKE_EVAL).catch(()=>{});
+          await new Promise(r=>setTimeout(r,400));
+        }
+        win.show();const image=await win.webContents.capturePage();fs.writeFileSync(process.env.PIKPAK_SMOKE_SCREENSHOT,image.toPNG())
+      }
       catch(error){fs.writeFileSync(process.env.PIKPAK_SMOKE_SCREENSHOT+'.error.txt',String(error?.stack||error))}
       finally{if(process.env.PIKPAK_SMOKE_EXIT==='1')app.quit()}
     },1200));

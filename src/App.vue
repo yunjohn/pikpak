@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 
 const api = window.pikpak || {
   getAccount: async()=>({connected:false}), getAccountAbout:async()=>({quota:null}), onAccountExpired:()=>()=>{}, setAccessToken:async token=>({connected:!!token}), login:async()=>({connected:false}), logout:async()=>({connected:false}),
@@ -339,6 +339,93 @@ async function deleteForever(){
 }
 function navigateCrumb(index){const target=pathStack.value[index];pathStack.value=pathStack.value.slice(0,index+1);if(mode.value==='drive')loadDrive(target.id,target.name,'replace');else if(target.url)loadShare(target.url,target.name,false)}
 function refreshCurrent(){if(mode.value==='drive')loadDrive(pathStack.value.at(-1)?.id,'','replace');else if(mode.value==='share'&&share.value){pathStack.value.pop();loadShare(share.value.url,pathStack.value.at(-1)?.name||'分享目录',false)}}
+function hasActiveModal(){
+  return Boolean(archive.value?.open || shareSaveDialog.value?.open || conflictDialog.value?.open || batchResultModal.value?.open);
+}
+function closeActiveModal(){
+  if(batchResultModal.value?.open){batchResultModal.value.open=false;return true}
+  if(conflictDialog.value?.open){conflictDialog.value.open=false;return true}
+  if(shareSaveDialog.value?.open){shareSaveDialog.value.open=false;return true}
+  if(archive.value?.open){archive.value.open=false;return true}
+  return false;
+}
+function handleGlobalKeyDown(e){
+  const tag=e.target?.tagName;
+  const isInput=tag==='INPUT'||tag==='TEXTAREA'||Boolean(e.target?.isContentEditable);
+  if(e.key==='Escape'){
+    if(closeActiveModal()){e.preventDefault();return}
+    if(!isInput&&selectedIds.value.length){e.preventDefault();clearSelection();return}
+  }
+  if(isInput||hasActiveModal())return;
+  const key=e.key, isCtrlOrCmd=e.ctrlKey||e.metaKey;
+  if(isCtrlOrCmd&&(key==='a'||key==='A')&&!e.shiftKey&&!e.altKey){
+    if(['drive','starred','recent','trash','search','share'].includes(mode.value)&&visibleFiles.value.length){
+      e.preventDefault();
+      selectedIds.value=visibleFiles.value.map(f=>f.id);
+      if(!selected.value||!selectedIds.value.includes(selected.value.id))selected.value=visibleFiles.value[0];
+    }
+    return;
+  }
+  if(key==='F5'||(isCtrlOrCmd&&(key==='r'||key==='R')&&!e.shiftKey&&!e.altKey)){
+    e.preventDefault();
+    refreshCurrent();
+    return;
+  }
+  if(key==='F2'){
+    if(mode.value==='drive'&&selected.value){e.preventDefault();renameSelected()}
+    return;
+  }
+  if(key==='Delete'){
+    if(selectedIds.value.length){
+      e.preventDefault();
+      if(['drive','starred','recent','search'].includes(mode.value))trashSelected();
+      else if(mode.value==='trash')deleteForever();
+    }
+    return;
+  }
+  if(isCtrlOrCmd&&(key==='c'||key==='C')&&!e.shiftKey&&!e.altKey){
+    if(mode.value==='drive'&&selectedItems.value.length){e.preventDefault();stageTransfer('copy')}
+    return;
+  }
+  if(isCtrlOrCmd&&(key==='x'||key==='X')&&!e.shiftKey&&!e.altKey){
+    if(mode.value==='drive'&&selectedItems.value.length){e.preventDefault();stageTransfer('move')}
+    return;
+  }
+  if(isCtrlOrCmd&&(key==='v'||key==='V')&&!e.shiftKey&&!e.altKey){
+    if(mode.value==='drive'&&clipboard.value){e.preventDefault();pasteTransfer()}
+    return;
+  }
+  if(key===' '||key==='Spacebar'){
+    if(selected.value){e.preventDefault();openItem(selected.value)}
+    return;
+  }
+  if(key==='Enter'){
+    if(selected.value&&!e.target?.classList?.contains('file-row')){e.preventDefault();openItem(selected.value)}
+    return;
+  }
+  if(key==='ArrowDown'||key==='ArrowUp'){
+    if(['drive','starred','recent','trash','search','share'].includes(mode.value)&&visibleFiles.value.length){
+      e.preventDefault();
+      const list=visibleFiles.value;
+      if(!selected.value||!selectedIds.value.length){
+        selected.value=list[0];
+        selectedIds.value=[list[0].id];
+        return;
+      }
+      const currentIndex=list.findIndex(f=>f.id===selected.value.id);
+      let nextIndex=0;
+      if(currentIndex===-1)nextIndex=0;
+      else if(key==='ArrowDown')nextIndex=Math.min(list.length-1,currentIndex+1);
+      else nextIndex=Math.max(0,currentIndex-1);
+      selected.value=list[nextIndex];
+      selectedIds.value=[list[nextIndex].id];
+      nextTick(()=>{
+        const selectedEl=document.querySelector('.file-row.selected');
+        if(selectedEl&&typeof selectedEl.scrollIntoView==='function')selectedEl.scrollIntoView({block:'nearest'});
+      });
+    }
+  }
+}
 watch([mode,pathStack,treeExpanded,treeChildren],persistNavigationState,{deep:true});
 onMounted(async()=>{
   api.onDownload(upsertDownload);
@@ -351,8 +438,11 @@ onMounted(async()=>{
   [downloads.value,uploads.value,settings.value]=await Promise.all([api.listDownloads(),api.listUploads(),api.getSettings()]);
   account.value=await api.getAccount();
   if(account.value.connected){restoreNavigationState();refreshQuota();resumeDrive()}else{resetNavigationState()}
-  window.addEventListener('keydown',e=>{if(e.key==='Escape'&&selectedIds.value.length)clearSelection()});
-})
+  window.addEventListener('keydown',handleGlobalKeyDown);
+});
+onUnmounted(()=>{
+  window.removeEventListener('keydown',handleGlobalKeyDown);
+});
 </script>
 
 <template>
@@ -443,10 +533,46 @@ onMounted(async()=>{
         <label><span><b>默认下载目录</b><small>{{settings.downloadDirectory||settings.effectiveDownloadDirectory||'系统下载目录'}}</small></span><button class="soft" @click="chooseDownloadDirectory">选择目录</button></label>
         <label><span><b>同时下载任务数</b><small>范围 1–8</small></span><input v-model.number="settings.downloadConcurrency" type="number" min="1" max="8"></label>
         <label><span><b>同时上传任务数</b><small>范围 1–8</small></span><input v-model.number="settings.uploadConcurrency" type="number" min="1" max="8"></label>
+        <h2>快捷键指南</h2><p>客户端支持完整的桌面快捷键与键盘无障碍操作：</p>
+        <div class="shortcut-table">
+          <div class="shortcut-row"><kbd>Ctrl + A</kbd><span>全选当前列表文件</span></div>
+          <div class="shortcut-row"><kbd>Delete</kbd><span>移入回收站 / 永久删除</span></div>
+          <div class="shortcut-row"><kbd>F2</kbd><span>重命名当前选中项</span></div>
+          <div class="shortcut-row"><kbd>F5 / Ctrl + R</kbd><span>刷新当前目录或分享</span></div>
+          <div class="shortcut-row"><kbd>Ctrl + C / X / V</kbd><span>复制 / 剪切 / 粘贴文件</span></div>
+          <div class="shortcut-row"><kbd>Space (空格)</kbd><span>快速打开预览音视频/图片</span></div>
+          <div class="shortcut-row"><kbd>Enter (回车)</kbd><span>进入文件夹或打开查看器</span></div>
+          <div class="shortcut-row"><kbd>↑ / ↓</kbd><span>在文件列表中上下移动高亮项</span></div>
+          <div class="shortcut-row"><kbd>Esc</kbd><span>取消选中或关闭当前对话框</span></div>
+        </div>
+        <h2>隐私与数据安全说明</h2>
+        <div class="privacy-card">
+          <div class="privacy-item">
+            <b>🔐 本地凭证安全加密</b>
+            <p>登录授权 Token 仅保存在本地用户数据目录，默认采用操作系统级凭证层（Windows SafeStorage / DPAPI）加密存储，不上传非 PikPak 官方的任何第三方服务器。</p>
+          </div>
+          <div class="privacy-item">
+            <b>⚡ 端到端直连传输</b>
+            <p>文件上传、分片及下载请求直接在您的电脑与官方存储节点（Aliyun OSS / PikPak CDN）之间建立 HTTPS 加密连接，无中间服务器代理中转。</p>
+          </div>
+          <div class="privacy-item">
+            <b>🛡️ 零追踪与敏感日志脱敏</b>
+            <p>本客户端无任何用户隐私遥测、埋点追踪或广告 SDK；本地运行日志与诊断信息对 Token、密码等私密数据实施强制脱敏抹除。</p>
+          </div>
+        </div>
         <h2>系统诊断</h2><p>用于排查问题，诊断信息已自动脱敏，不含账户 Token 或敏感密码。</p>
         <div class="settings-actions"><button class="soft" @click="exportDiagnosticsReport">导出诊断报告 (JSON)</button><button class="warn" @click="resetSettingsToDefault">恢复默认设置</button></div>
         <h2>数据与缓存管理</h2><p>一键清理本机存储的下载/上传历史、播放进度与网络会话缓存。清理不会删除云端网盘文件。</p>
         <div class="settings-actions"><button class="warn" @click="clearAllDataCache">一键清理缓存与记录</button></div>
+        <h2>第三方开源许可</h2><p>PikPak Desktop 构建于以下优秀的开源基础组件之上：</p>
+        <div class="license-list">
+          <div class="license-row"><b>Electron</b><span>v44.2.0</span><span>MIT License</span></div>
+          <div class="license-row"><b>Vue</b><span>v3.5</span><span>MIT License</span></div>
+          <div class="license-row"><b>Vite</b><span>v8</span><span>MIT License</span></div>
+          <div class="license-row"><b>hls.js</b><span>v1.7.2</span><span>Apache License 2.0</span></div>
+          <div class="license-row"><b>Vitest</b><span>v5.0.0</span><span>MIT License</span></div>
+          <div class="license-row"><b>electron-builder</b><span>v26</span><span>MIT License</span></div>
+        </div>
         <footer><button class="primary" @click="persistSettings">保存设置</button></footer>
       </section>
       <section v-else-if="mode==='share'&&!share" class="connect-panel">
