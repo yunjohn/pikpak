@@ -510,7 +510,7 @@ ipcMain.handle('upload:cancel',(_,id)=>{id=String(id||'');const queued=uploadQue
 ipcMain.handle('upload:list',()=>uploadHistory);
 ipcMain.handle('upload:remove',(_,id)=>{uploadHistory=uploadHistory.filter(item=>item.id!==String(id||''));clearTimeout(uploadSaveTimer);uploadSaveTimer=setTimeout(flushUploadHistory,50);return uploadHistory});
 ipcMain.handle('upload:clear',()=>{uploadHistory=uploadHistory.filter(item=>['queued','hashing','uploading'].includes(item.state));clearTimeout(uploadSaveTimer);uploadSaveTimer=setTimeout(flushUploadHistory,50);return uploadHistory});
-ipcMain.handle('viewer:open',async(_,{url,name,fileId='',mimeType,sources=[],items=[]})=>{
+ipcMain.handle('viewer:open',async(_,{url,name,fileId='',mimeType,sources=[],items=[],subtitles=[]})=>{
   const target=String(url||'');if(!/^https?:\/\//i.test(target))throw new Error('当前文件没有可用的查看地址');
   const kind=previewKind(name,mimeType);
   if(!kind)throw new Error('此文件类型暂不支持预览，请使用“下载到本机”');
@@ -520,8 +520,16 @@ ipcMain.handle('viewer:open',async(_,{url,name,fileId='',mimeType,sources=[],ite
   viewerWindows.add(win);win.webContents.setWindowOpenHandler(()=>({action:'deny'}));
   const safeSources=(Array.isArray(sources)?sources:[]).slice(0,10).map(source=>({url:String(source?.url||''),label:String(source?.label||'清晰度').slice(0,30)})).filter(source=>/^https?:\/\//i.test(source.url));
   const safeItems=(Array.isArray(items)?items:[]).slice(0,60).map(item=>({id:String(item?.id||''),name:String(item?.name||'图片').slice(0,300),url:String(item?.url||'')})).filter(item=>/^https?:\/\//i.test(item.url));
-  const token=crypto.randomUUID();viewerPayloads.set(token,{webContentsId:win.webContents.id,payload:{url:target,name:String(name||'文件查看'),kind,fileId,sources:safeSources,items:safeItems}});win.on('closed',()=>{viewerWindows.delete(win);viewerPayloads.delete(token)});
+  const safeSubtitles=(Array.isArray(subtitles)?subtitles:[]).slice(0,15).map(sub=>({id:String(sub?.id||''),name:String(sub?.name||'字幕').slice(0,120),url:String(sub?.url||'')})).filter(sub=>/^https?:\/\//i.test(sub.url));
+  const token=crypto.randomUUID();viewerPayloads.set(token,{webContentsId:win.webContents.id,payload:{url:target,name:String(name||'文件查看'),kind,fileId,sources:safeSources,items:safeItems,subtitles:safeSubtitles}});win.on('closed',()=>{viewerWindows.delete(win);viewerPayloads.delete(token)});
   await win.loadFile(path.join(__dirname,'viewer.html'),{query:{token}});return true;
+});
+ipcMain.handle('app:clear-cache',async()=>{
+  downloadHistory=[];uploadHistory=[];playbackHistory={};
+  saveDownloadHistory();flushUploadHistory();flushPlaybackHistory();
+  try{await session.defaultSession.clearCache()}catch(err){logger.warn('app','Failed to clear session cache',err)}
+  logger.info('app','Application cache and histories cleared');
+  return true;
 });
 ipcMain.handle('viewer:payload-get',(event,token)=>{const entry=viewerPayloads.get(String(token||''));if(!entry||entry.webContentsId!==event.sender.id)throw new Error('查看会话已失效，请重新打开文件');return entry.payload});
 function viewerFor(event){const win=BrowserWindow.fromWebContents(event.sender);if(!win||!viewerWindows.has(win))throw new Error('无效的查看窗口');return win}

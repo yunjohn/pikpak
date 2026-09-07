@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
-const { parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken } = require('../electron/core.cjs');
+const { parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, matchSubtitles } = require('../electron/core.cjs');
 
 describe('desktop core', () => {
   it('parses a PikPak share id and opaque directory token', () => {
@@ -38,6 +38,22 @@ describe('desktop core', () => {
     expect(buildShareRestorePayload({shareId:'share-1',passCodeToken:'token',fileIds:['a','a','b']})).toEqual({
       share_id:'share-1',pass_code_token:'token',file_ids:['a','b'],params:{trace_file_ids:'a,b'}
     });
+    expect(buildShareRestorePayload({shareId:'share-1',fileIds:['a'],toParentId:'folder-123'})).toMatchObject({
+      to_parent_id:'folder-123'
+    });
+  });
+
+  it('matches subtitles in the same folder by name similarity and ranks them', () => {
+    const list = [
+      { id: 'sub1', name: 'Movie.2024.chs.srt' },
+      { id: 'sub2', name: 'Movie.2024.mkv' },
+      { id: 'sub3', name: 'Other.Show.S01E01.vtt' },
+      { id: 'sub4', name: 'Movie.2024.ass' },
+      { id: 'folder', name: 'Subtitles', kind: 'drive#folder' }
+    ];
+    const matched = matchSubtitles('Movie.2024.mkv', list);
+    expect(matched.map(f => f.id)).toEqual(['sub4', 'sub1', 'sub3']);
+    expect(matchSubtitles('Unrelated.mp4', [])).toEqual([]);
   });
 
   it('builds an official URL-upload task and rejects unsupported input', () => {

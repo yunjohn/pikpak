@@ -30,11 +30,13 @@ function mergeShareFiles(apiFiles, scrapedFiles) {
   for (const item of scrapedFiles || []) if (!known.has(String(item.id))) merged.push(item);
   return merged;
 }
-function buildShareRestorePayload({ shareId, passCodeToken='', fileIds=[] }) {
+function buildShareRestorePayload({ shareId, passCodeToken='', fileIds=[], toParentId='' }) {
   const ids=Array.from(new Set((fileIds || []).map(value=>String(value || '').trim()).filter(Boolean)));
   if(!String(shareId || '').trim())throw new Error('缺少分享 ID');
   if(!ids.length)throw new Error('请选择需要保存的文件');
-  return {share_id:String(shareId).trim(),pass_code_token:String(passCodeToken || ''),file_ids:ids,params:{trace_file_ids:ids.join(',')}};
+  const payload={share_id:String(shareId).trim(),pass_code_token:String(passCodeToken || ''),file_ids:ids,params:{trace_file_ids:ids.join(',')}};
+  if(toParentId)payload.to_parent_id=String(toParentId).trim();
+  return payload;
 }
 function buildOfflineTaskPayload(value) {
   const url=String(value || '').trim();
@@ -111,4 +113,30 @@ function sanitizeSubDir(subDir) {
     .join('/');
 }
 
-module.exports = { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, sanitizeSubDir };
+function matchSubtitles(videoName, fileList) {
+  if (!videoName || !Array.isArray(fileList)) return [];
+  const baseName = String(videoName).replace(/\.[^/.]+$/, '').trim().toLowerCase();
+  const subFiles = fileList.filter(f => {
+    const name = String(f?.name || '');
+    return /\.(srt|vtt|ass)$/i.test(name) && f?.kind !== 'drive#folder';
+  });
+  if (!subFiles.length) return [];
+  const scored = subFiles.map(file => {
+    const subBase = String(file.name).replace(/\.[^/.]+$/, '').trim().toLowerCase();
+    let score = 0;
+    if (subBase === baseName) score = 100;
+    else if (subBase.startsWith(baseName)) score = 80;
+    else if (baseName.startsWith(subBase)) score = 70;
+    else {
+      const videoTokens = new Set(baseName.split(/[._\-\s]+/).filter(t => t.length > 1));
+      const subTokens = subBase.split(/[._\-\s]+/).filter(t => t.length > 1);
+      const overlap = subTokens.filter(t => videoTokens.has(t)).length;
+      if (overlap > 0) score = Math.min(60, overlap * 20);
+      else score = 10;
+    }
+    return { file, score };
+  });
+  return scored.filter(item => item.score > 0).sort((a, b) => b.score - a.score).map(item => item.file);
+}
+
+module.exports = { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, matchSubtitles };

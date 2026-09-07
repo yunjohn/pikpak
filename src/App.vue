@@ -5,7 +5,7 @@ import FolderTree from './FolderTree.vue';
 const api = window.pikpak || {
   getAccount: async()=>({connected:false}), getAccountAbout:async()=>({quota:null}), onAccountExpired:()=>()=>{}, setAccessToken:async token=>({connected:!!token}), login:async()=>({connected:false}), logout:async()=>({connected:false}),
   listDrive:async()=>({files:demoFiles}), searchDrive:async()=>({files:[],scanned:0,folders:0}), cancelSearch:async()=>true, onSearchProgress:()=>()=>{}, getDriveFile:async()=>({}), listStarred:async()=>({files:[]}), listRecent:async()=>({files:[]}), listMyShares:async()=>({files:[]}), copyShare:async()=>'', cancelShares:async()=>({}), setStarred:async()=>({}), openShare:async()=>({share:{shareId:'demo'},files:demoFiles}),
-  getShareFile:async()=>({}), restoreShare:async()=>({}), createShare:async()=>({shareUrl:'https://mypikpak.com/s/demo',passCode:'1234'}), createOfflineTask:async()=>({}), listOfflineTasks:async()=>({tasks:[]}), deleteOfflineTask:async()=>({}), createFolder:async()=>({}), rename:async()=>({}), trash:async()=>({}), transfer:async()=>({}), listTrash:async()=>({files:[]}), restoreTrash:async()=>({}), deleteTrash:async()=>({}), startDownload:async payload=>({id:'demo',name:payload.name,state:'queued'}), openViewer:async()=>true, listArchive:async()=>({items:[]}), chooseUpload:async()=>[], chooseUploadFolder:async()=>[], uploadDroppedFiles:async()=>[], cancelUpload:async()=>false, retryUpload:async()=>({}), listUploads:async()=>[], removeUpload:async()=>[], clearUploads:async()=>[], getSettings:async()=>({downloadDirectory:'',effectiveDownloadDirectory:'',downloadConcurrency:3,uploadConcurrency:3}), chooseDownloadDirectory:async()=>'', saveSettings:async value=>value, resetSettings:async()=>({downloadDirectory:'',effectiveDownloadDirectory:'',downloadConcurrency:3,uploadConcurrency:3}), exportDiagnostics:async()=>({}), onUpload:()=>()=>{}, cancelDownload:async()=>true, retryDownload:async()=>({}), showDownload:async()=>true, listDownloads:async()=>[], removeDownload:async()=>[], clearDownloads:async()=>[], onDownload:()=>()=>{}
+  getShareFile:async()=>({}), restoreShare:async()=>({}), createShare:async()=>({shareUrl:'https://mypikpak.com/s/demo',passCode:'1234'}), createOfflineTask:async()=>({}), listOfflineTasks:async()=>({tasks:[]}), deleteOfflineTask:async()=>({}), createFolder:async()=>({}), rename:async()=>({}), trash:async()=>({}), transfer:async()=>({}), listTrash:async()=>({files:[]}), restoreTrash:async()=>({}), deleteTrash:async()=>({}), startDownload:async payload=>({id:'demo',name:payload.name,state:'queued'}), openViewer:async()=>true, listArchive:async()=>({items:[]}), chooseUpload:async()=>[], chooseUploadFolder:async()=>[], uploadDroppedFiles:async()=>[], cancelUpload:async()=>false, retryUpload:async()=>({}), listUploads:async()=>[], removeUpload:async()=>[], clearUploads:async()=>[], getSettings:async()=>({downloadDirectory:'',effectiveDownloadDirectory:'',downloadConcurrency:3,uploadConcurrency:3}),  chooseDownloadDirectory:async()=>'', saveSettings:async value=>value, resetSettings:async()=>({downloadDirectory:'',effectiveDownloadDirectory:'',downloadConcurrency:3,uploadConcurrency:3}), exportDiagnostics:async()=>({}), clearAppCache:async()=>true, onUpload:()=>()=>{}, cancelDownload:async()=>true, retryDownload:async()=>({}), showDownload:async()=>true, listDownloads:async()=>[], removeDownload:async()=>[], clearDownloads:async()=>[], onDownload:()=>()=>{}
 };
 const demoFiles = [
   {id:'demo-folder',kind:'drive#folder',name:'示例目录',modified_time:new Date().toISOString()},
@@ -20,6 +20,7 @@ const offlineTasks=ref([]), offlineUrl=ref('');
 const thumbFailed=ref({});
 const dragUpload=ref(false);
 const archive=ref({open:false,name:'',items:[],path:'',nodes:[],password:'',loading:false,error:'',request:null});
+const shareSaveDialog=ref({open:false,targetId:'',targetName:'根目录',folders:[],loading:false,path:[{id:'',name:'根目录'}]});
 const query=ref(''), sortBy=ref('name'), sortDirection=ref(1);
 const globalQuery=ref(''),searchStats=ref(null),searchLive=ref({scanned:0,folders:0,matchesCount:0,isDone:true});
 const clipboard=ref(null);
@@ -142,17 +143,15 @@ function imageViewerItems(current){
     return {id:String(value.id||''),name:value.name||'图片',url:previewUrl(value)};
   }).filter(entry=>/^https?:\/\//i.test(entry.url));
 }
-async function openSelected(){if(selectedItems.value.length!==1)return;const item=await hydrateFile(selectedItems.value[0]);if(!canPreview(item)){error.value='此文件类型暂不支持预览，请明确点击下载按钮后在本机打开';return}if(isArchive(item)){await openArchive(item);return}const url=previewUrl(item);if(!url){error.value='当前文件没有可用的查看地址';return}try{const progressId=mode.value==='share'?`share:${share.value?.shareId||''}:${item.id}`:`drive:${item.id}`;await api.openViewer({url,name:item.name,fileId:progressId,mimeType:item.mime_type||'',sources:isVideo(item)?playbackSources(item):[],items:isImage(item)?imageViewerItems(item):[]})}catch(e){error.value=e.message||String(e)}}
+function matchSubtitles(videoName,fileList){const subExtensions=new Set(['srt','vtt','ass']);const subFiles=(fileList||[]).filter(item=>{if(!item||item.kind==='drive#folder')return false;const ext=String(item.name||'').split('.').pop()?.toLowerCase();return subExtensions.has(ext)});if(!subFiles.length)return [];const baseName=String(videoName||'').replace(/\.[^/.]+$/,'').trim().toLowerCase();const scored=subFiles.map(file=>{const subBase=String(file.name).replace(/\.[^/.]+$/,'').trim().toLowerCase();let score=0;if(subBase===baseName)score=100;else if(subBase.startsWith(baseName))score=80;else if(baseName.startsWith(subBase))score=70;else{const videoTokens=new Set(baseName.split(/[._\-\s]+/).filter(t=>t.length>1)),subTokens=subBase.split(/[._\-\s]+/).filter(t=>t.length>1),overlap=subTokens.filter(t=>videoTokens.has(t)).length;if(overlap>0)score=Math.min(60,overlap*20);else score=10}return {file,score}});return scored.filter(item=>item.score>0).sort((a,b)=>b.score-a.score).map(item=>item.file)}
+async function matchedSubtitlesFor(item){if(!isVideo(item))return [];const subs=matchSubtitles(item.name,files.value).slice(0,5),result=[];for(const sub of subs){let hydrated=sub;if(!contentUrl(hydrated)){try{hydrated=await hydrateFile(sub)}catch{}}const url=contentUrl(hydrated);if(url)result.push({id:sub.id,name:sub.name,url})}return result}
+async function openSelected(){if(selectedItems.value.length!==1)return;const item=await hydrateFile(selectedItems.value[0]);if(!canPreview(item)){error.value='此文件类型暂不支持预览，请明确点击下载按钮后在本机打开';return}if(isArchive(item)){await openArchive(item);return}const url=previewUrl(item);if(!url){error.value='当前文件没有可用的查看地址';return}try{const progressId=mode.value==='share'?`share:${share.value?.shareId||''}:${item.id}`:`drive:${item.id}`;const subtitles=isVideo(item)?await matchedSubtitlesFor(item):[];await api.openViewer({url,name:item.name,fileId:progressId,mimeType:item.mime_type||'',sources:isVideo(item)?playbackSources(item):[],items:isImage(item)?imageViewerItems(item):[],subtitles})}catch(e){error.value=e.message||String(e)}}
 async function itemAction(item,action){selectedIds.value=[item.id];selected.value=item;const actions={open:openSelected,download:downloadSelected,save:saveShareSelected,share:createShareSelected,star:toggleStarred,copy:()=>stageTransfer('copy'),move:()=>stageTransfer('move'),rename:renameSelected,trash:trashSelected,restore:restoreSelected,delete:deleteForever,copyShare:copyMyShare,cancelShare:cancelMyShares};await actions[action]?.()}
-async function saveShareSelected(){
-  if(!selectedItems.value.length||mode.value!=='share'||!share.value)return;
-  if(!account.value.connected){error.value='请先连接 PikPak 账户，再保存分享文件';return}
-  await run(async()=>{
-    await api.restoreShare({shareId:share.value.shareId,passCodeToken:share.value.passCodeToken||'',fileIds:selectedItems.value.map(item=>item.id)});
-    notice.value=`已提交保存 ${selectedItems.value.length} 项到我的 PikPak`;
-    setTimeout(()=>{notice.value=''},4000);
-  });
-}
+async function loadSaveDialogFolders(parentId){shareSaveDialog.value.loading=true;try{const res=await api.listDrive(parentId);shareSaveDialog.value.folders=(res.files||[]).filter(item=>item.kind==='drive#folder')}catch(e){error.value=e.message||String(e)}finally{shareSaveDialog.value.loading=false}}
+async function navigateSaveDialog(folder){shareSaveDialog.value.targetId=folder.id;shareSaveDialog.value.targetName=folder.name;shareSaveDialog.value.path.push(folder);await loadSaveDialogFolders(folder.id)}
+async function navigateSaveDialogCrumb(index){shareSaveDialog.value.path=shareSaveDialog.value.path.slice(0,index+1);const current=shareSaveDialog.value.path.at(-1);shareSaveDialog.value.targetId=current?.id||'';shareSaveDialog.value.targetName=current?.name||'根目录';await loadSaveDialogFolders(shareSaveDialog.value.targetId)}
+async function saveShareSelected(){if(!selectedItems.value.length||mode.value!=='share'||!share.value)return;if(!account.value.connected){error.value='请先连接 PikPak 账户，再保存分享文件';return}shareSaveDialog.value={open:true,targetId:'',targetName:'根目录',folders:[],loading:true,path:[{id:'',name:'根目录'}]};await loadSaveDialogFolders('')}
+async function confirmSaveShare(toParentId=''){shareSaveDialog.value.open=false;await run(async()=>{await api.restoreShare({shareId:share.value.shareId,passCodeToken:share.value.passCodeToken||'',fileIds:selectedItems.value.map(item=>item.id),toParentId:toParentId||undefined});const targetLabel=toParentId?`到「${shareSaveDialog.value.targetName}」`:'到网盘根目录';notice.value=`已提交保存 ${selectedItems.value.length} 项${targetLabel}`;setTimeout(()=>{notice.value=''},4000)})}
 async function createShareSelected(){if(!selectedItems.value.length)return;await run(async()=>{const result=await api.createShare({ids:selectedItems.value.map(item=>item.id),expirationDays:7,encrypted:true});notice.value=`分享链接已复制${result.passCode?`，提取码 ${result.passCode}`:''}`;setTimeout(()=>{notice.value=''},6000)})}
 async function copyMyShare(){if(selectedItems.value.length!==1)return;const item=selectedItems.value[0];await api.copyShare({shareUrl:item.share_url,passCode:item.pass_code});notice.value=`“${item.name}”的链接已复制`;setTimeout(()=>{notice.value=''},3500)}
 async function cancelMyShares(){if(!selectedItems.value.length||!window.confirm(`取消选中的 ${selectedItems.value.length} 个分享？原网盘文件不会被删除。`))return;await run(async()=>{await api.cancelShares(selectedItems.value.map(item=>item.id));notice.value='分享已取消';await loadMyShares();setTimeout(()=>{notice.value=''},3500)})}
@@ -178,6 +177,7 @@ async function retryDownloadTask(id){try{const task=await api.retryDownload(id);
 async function chooseDownloadDirectory(){const value=await api.chooseDownloadDirectory();if(value)settings.value.downloadDirectory=value}
 async function persistSettings(){try{settings.value=await api.saveSettings(settings.value);notice.value='设置已保存';setTimeout(()=>{notice.value=''},2500)}catch(e){error.value=e.message||String(e)}}
 async function resetSettingsToDefault(){if(!window.confirm('确定将所有设置恢复为默认值吗？'))return;try{settings.value=await api.resetSettings();notice.value='已恢复默认设置';setTimeout(()=>{notice.value=''},2500)}catch(e){error.value=e.message||String(e)}}
+async function clearAllDataCache(){if(!window.confirm('确定要清理本机的下载历史、上传历史、播放进度和会话缓存吗？云端网盘文件不会受到影响。'))return;try{await api.clearAppCache();downloads.value=[];uploads.value=[];notice.value='已清理本机缓存与传输历史记录';setTimeout(()=>{notice.value=''},3000)}catch(e){error.value=e.message||String(e)}}
 async function exportDiagnosticsReport(){try{const report=await api.exportDiagnostics();const text=JSON.stringify(report,null,2);const blob=new Blob([text],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`pikpak-diagnostics-${new Date().toISOString().replace(/[:.]/g,'-').slice(0,19)}.json`;a.click();URL.revokeObjectURL(url);notice.value='诊断报告已导出';setTimeout(()=>{notice.value=''},3000)}catch(e){error.value=e.message||String(e)}}
 function setSort(key){if(sortBy.value===key)sortDirection.value*=-1;else{sortBy.value=key;sortDirection.value=1}}
 async function clearDownloadHistory(){downloads.value=await api.clearDownloads()}
@@ -304,6 +304,8 @@ onMounted(async()=>{
         <label><span><b>同时上传任务数</b><small>范围 1–8</small></span><input v-model.number="settings.uploadConcurrency" type="number" min="1" max="8"></label>
         <h2>系统诊断</h2><p>用于排查问题，诊断信息已自动脱敏，不含账户 Token 或敏感密码。</p>
         <div class="settings-actions"><button class="soft" @click="exportDiagnosticsReport">导出诊断报告 (JSON)</button><button class="warn" @click="resetSettingsToDefault">恢复默认设置</button></div>
+        <h2>数据与缓存管理</h2><p>一键清理本机存储的下载/上传历史、播放进度与网络会话缓存。清理不会删除云端网盘文件。</p>
+        <div class="settings-actions"><button class="warn" @click="clearAllDataCache">一键清理缓存与记录</button></div>
         <footer><button class="primary" @click="persistSettings">保存设置</button></footer>
       </section>
       <section v-else-if="mode==='share'&&!share" class="connect-panel">
@@ -337,6 +339,22 @@ onMounted(async()=>{
           <button v-for="item in archive.items" :key="`${item.index}:${item.path}:${item.name}`" class="archive-row" :disabled="item.kind!=='drive#folder'" :title="item.kind==='drive#folder'?'双击进入目录':'只读查看，不会下载'" @dblclick="item.kind==='drive#folder'&&enterArchiveFolder(item)"><span><i>{{item.kind==='drive#folder'?'📁':'📄'}}</i>{{item.name}}</span><em>{{item.kind==='drive#folder'?'—':size(item.size)}}</em></button>
         </div>
         <footer>只读查看 · 不会下载或解压文件</footer>
+      </section>
+    </div>
+    <div v-if="shareSaveDialog.open" class="archive-overlay" @click.self="shareSaveDialog.open=false">
+      <section class="archive-dialog" role="dialog" aria-modal="true" aria-label="选择保存位置">
+        <header><div><small>保存分享文件到我的 PikPak</small><h2>保存到：{{shareSaveDialog.targetName}}</h2></div><button class="remove" title="关闭" @click="shareSaveDialog.open=false">×</button></header>
+        <nav class="archive-crumbs"><button v-for="(part,index) in shareSaveDialog.path" :key="part.id" @click="navigateSaveDialogCrumb(index)">{{part.name}}<span v-if="index<shareSaveDialog.path.length-1">›</span></button></nav>
+        <div class="archive-head"><span>网盘文件夹</span><span>操作</span></div>
+        <div class="archive-list">
+          <div v-if="shareSaveDialog.loading" class="archive-state">正在加载文件夹…</div>
+          <div v-else-if="!shareSaveDialog.folders.length" class="archive-state">当前目录下暂无子文件夹，可直接点击下方按钮保存到此处</div>
+          <button v-for="folder in shareSaveDialog.folders" :key="folder.id" class="archive-row" title="点击选择并进入" @click="navigateSaveDialog(folder)"><span><i>📁</i>{{folder.name}}</span><em>进入 ›</em></button>
+        </div>
+        <footer class="share-dialog-actions">
+          <button class="soft" @click="confirmSaveShare('')">直接保存到根目录</button>
+          <button class="primary" @click="confirmSaveShare(shareSaveDialog.targetId)">保存到当前目录 ({{shareSaveDialog.targetName}})</button>
+        </footer>
       </section>
     </div>
   </div>

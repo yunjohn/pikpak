@@ -25,3 +25,5 @@
 .toolbar-actions .warn:hover{background:#fde6e4}
 .toolbar-actions .accent{border:0;border-radius:8px;padding:8px 13px;cursor:pointer;background:#e6efff;color:#1e61d6}
 .toolbar-actions .accent:hover{background:#d5e4fc}
+.share-dialog-actions{display:flex;justify-content:flex-end;gap:10px;align-items:center}
+.share-dialog-actions button{padding:8px 14px;font-size:12px}
