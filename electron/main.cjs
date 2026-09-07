@@ -635,7 +635,13 @@ function createWindow() {
           await win.webContents.executeJavaScript(process.env.PIKPAK_SMOKE_EVAL).catch(()=>{});
           await new Promise(r=>setTimeout(r,400));
         }
-        win.show();const image=await win.webContents.capturePage();fs.writeFileSync(process.env.PIKPAK_SMOKE_SCREENSHOT,image.toPNG())
+        win.show();
+        let image,lastError;
+        for(let attempt=0;attempt<5&&!image;attempt++){
+          try{image=await win.webContents.capturePage()}catch(error){lastError=error;if(attempt<4)await new Promise(r=>setTimeout(r,400))}
+        }
+        if(!image)throw lastError||new Error('无法捕获客户端窗口');
+        fs.writeFileSync(process.env.PIKPAK_SMOKE_SCREENSHOT,image.toPNG())
       }
       catch(error){fs.writeFileSync(process.env.PIKPAK_SMOKE_SCREENSHOT+'.error.txt',String(error?.stack||error))}
       finally{if(process.env.PIKPAK_SMOKE_EXIT==='1')app.quit()}

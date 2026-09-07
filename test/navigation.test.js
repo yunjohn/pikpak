@@ -20,8 +20,6 @@ describe('navigation state management', () => {
     const mode = ref('drive');
     const account = ref({ connected: initialConnected });
     const pathStack = ref([{ id: '', name: '全部文件' }]);
-    const treeChildren = ref({});
-    const treeExpanded = ref([]);
     const selectedIds = ref([]);
     const selected = ref(null);
 
@@ -32,8 +30,6 @@ describe('navigation state management', () => {
 
     function resetNavigationState() {
       pathStack.value = [{ id: '', name: '全部文件' }];
-      treeChildren.value = {};
-      treeExpanded.value = [];
       clearSelection();
     }
 
@@ -48,22 +44,6 @@ describe('navigation state management', () => {
             name: String(item.name || '目录').slice(0, 200)
           }));
         }
-        if (Array.isArray(value.expanded)) {
-          treeExpanded.value = value.expanded.map(String).filter(Boolean).slice(0, 1000);
-        }
-        if (value.children && typeof value.children === 'object' && !Array.isArray(value.children)) {
-          const safe = {};
-          for (const [id, nodes] of Object.entries(value.children).slice(0, 1000)) {
-            if (Array.isArray(nodes)) {
-              safe[id] = nodes.slice(0, 1000).map(node => ({
-                id: String(node.id || ''),
-                name: String(node.name || '目录').slice(0, 200),
-                kind: 'drive#folder'
-              })).filter(node => node.id);
-            }
-          }
-          treeChildren.value = safe;
-        }
       } catch {
         localStorage.removeItem(NAV_STATE_KEY);
       }
@@ -73,21 +53,17 @@ describe('navigation state management', () => {
       if (mode.value !== 'drive' || !account.value.connected) return;
       try {
         localStorage.setItem(NAV_STATE_KEY, JSON.stringify({
-          path: pathStack.value,
-          expanded: treeExpanded.value,
-          children: treeChildren.value
+          path: pathStack.value
         }));
       } catch {}
     }
 
-    watch([mode, pathStack, treeExpanded, treeChildren], persistNavigationState, { deep: true });
+    watch([mode, pathStack], persistNavigationState, { deep: true });
 
     return {
       mode,
       account,
       pathStack,
-      treeChildren,
-      treeExpanded,
       selected,
       selectedIds,
       resetNavigationState,
@@ -107,8 +83,6 @@ describe('navigation state management', () => {
     harness.restoreNavigationState();
 
     expect(harness.pathStack.value).toEqual([{ id: '', name: '全部文件' }]);
-    expect(harness.treeExpanded.value).toEqual([]);
-    expect(harness.treeChildren.value).toEqual({});
   });
 
   it('restores navigation state only after user is connected', () => {
@@ -129,9 +103,6 @@ describe('navigation state management', () => {
       { id: '', name: '全部文件' },
       { id: 'work', name: '工作文档' }
     ]);
-    expect(harness.treeExpanded.value).toEqual(['work']);
-    expect(harness.treeChildren.value['']).toHaveLength(1);
-    expect(harness.treeChildren.value[''][0].name).toBe('工作文档');
   });
 
   it('clears navigation state and removes localStorage on account expiration or logout', () => {
@@ -150,8 +121,6 @@ describe('navigation state management', () => {
     localStorage.removeItem(NAV_STATE_KEY);
 
     expect(harness.pathStack.value).toEqual([{ id: '', name: '全部文件' }]);
-    expect(harness.treeChildren.value).toEqual({});
-    expect(harness.treeExpanded.value).toEqual([]);
     expect(localStorage.getItem(NAV_STATE_KEY)).toBeNull();
   });
 
@@ -169,6 +138,7 @@ describe('navigation state management', () => {
     expect(localStorage.getItem(NAV_STATE_KEY)).not.toBeNull();
     const stored = JSON.parse(localStorage.getItem(NAV_STATE_KEY));
     expect(stored.path.some(p => p.id === 'another-folder')).toBe(true);
+    expect(stored).toEqual({ path: stored.path });
   });
 });
 

@@ -27,7 +27,6 @@ const query=ref(''), sortBy=ref('name'), sortDirection=ref(1);
 const globalQuery=ref(''),searchStats=ref(null),searchLive=ref({scanned:0,folders:0,matchesCount:0,isDone:true});
 const clipboard=ref(null);
 const pathStack=ref([{id:'',name:'全部文件'}]);
-const treeChildren=ref({}), treeExpanded=ref([]);
 const NAV_STATE_KEY='pikpak-desktop-navigation-v1';
 const folders=computed(()=>files.value.filter(item=>item.kind==='drive#folder'));
 const selectedItems=computed(()=>files.value.filter(item=>selectedIds.value.includes(item.id)));
@@ -51,9 +50,9 @@ function onListScroll(e){
 const title=computed(()=>mode.value==='drive'?'我的 PikPak':mode.value==='search'?'全盘搜索':mode.value==='starred'?'收藏':mode.value==='recent'?'最近':mode.value==='myshares'?'我的分享':mode.value==='uploads'?'上传任务':mode.value==='downloads'?'本机下载':mode.value==='offline'?'离线下载':mode.value==='trash'?'回收站':mode.value==='settings'?'设置':(share.value?'分享文件':'打开分享'));
 
 function size(value){let n=Number(value);if(!n)return '—';const u=['B','KB','MB','GB','TB'];let i=0;while(n>=1024&&i<4){n/=1024;i++}return `${n.toFixed(i?1:0)} ${u[i]}`}
-function resetNavigationState(){pathStack.value=[{id:'',name:'全部文件'}];treeChildren.value={};treeExpanded.value=[];clearSelection()}
-function restoreNavigationState(){if(!account.value.connected)return;try{const value=JSON.parse(localStorage.getItem(NAV_STATE_KEY)||'null');if(!value||typeof value!=='object')return;if(Array.isArray(value.path)&&value.path.length&&value.path.length<100)pathStack.value=value.path.map(item=>({id:String(item.id||''),name:String(item.name||'目录').slice(0,200)}));if(Array.isArray(value.expanded))treeExpanded.value=value.expanded.map(String).filter(Boolean).slice(0,1000);if(value.children&&typeof value.children==='object'&&!Array.isArray(value.children)){const safe={};for(const [id,nodes] of Object.entries(value.children).slice(0,1000))if(Array.isArray(nodes))safe[id]=nodes.slice(0,1000).map(node=>({id:String(node.id||''),name:String(node.name||'目录').slice(0,200),kind:'drive#folder'})).filter(node=>node.id);treeChildren.value=safe}}catch{localStorage.removeItem(NAV_STATE_KEY)}}
-function persistNavigationState(){if(mode.value!=='drive'||!account.value.connected)return;try{localStorage.setItem(NAV_STATE_KEY,JSON.stringify({path:pathStack.value,expanded:treeExpanded.value,children:treeChildren.value}))}catch{}}
+function resetNavigationState(){pathStack.value=[{id:'',name:'全部文件'}];clearSelection()}
+function restoreNavigationState(){if(!account.value.connected)return;try{const value=JSON.parse(localStorage.getItem(NAV_STATE_KEY)||'null');if(!value||typeof value!=='object')return;if(Array.isArray(value.path)&&value.path.length&&value.path.length<100)pathStack.value=value.path.map(item=>({id:String(item.id||''),name:String(item.name||'目录').slice(0,200)}))}catch{localStorage.removeItem(NAV_STATE_KEY)}}
+function persistNavigationState(){if(mode.value!=='drive'||!account.value.connected)return;try{localStorage.setItem(NAV_STATE_KEY,JSON.stringify({path:pathStack.value}))}catch{}}
 function resumeDrive(){const target=pathStack.value.at(-1)||{id:'',name:'全部文件'};return loadDrive(target.id,target.name,'replace')}
 function icon(item){if(item.kind==='drive#folder')return '📁';if((item.mime_type||'').startsWith('video/'))return '🎬';if((item.mime_type||'').startsWith('image/'))return '🖼️';if((item.mime_type||'').startsWith('audio/'))return '🎵';return '📄'}
 function contentUrl(item){const list=item?.medias||[];return list.find(x=>x.is_origin&&x.link?.url)?.link?.url||item?.web_content_link||list.find(x=>x.link?.url)?.link?.url||''}
@@ -67,9 +66,7 @@ function previewUrl(item){return (isVideo(item)?playbackSources(item)[0]?.url:''
 function markThumbFailed(item){if(Object.keys(thumbFailed.value).length>300)thumbFailed.value={};thumbFailed.value={...thumbFailed.value,[item.id]:true}}
 async function run(work){loading.value=true;error.value='';try{await work()}catch(e){error.value=e.message||String(e)}finally{loading.value=false}}
 function clearSelection(){selected.value=null;selectedIds.value=[]}
-async function loadDrive(parentId='', name='全部文件',stackMode=parentId?'push':'reset'){await run(async()=>{mode.value='drive';share.value=null;files.value=(await api.listDrive(parentId)).files;treeChildren.value={...treeChildren.value,[parentId]:files.value.filter(item=>item.kind==='drive#folder')};if(parentId&&!treeExpanded.value.includes(parentId))treeExpanded.value=[...treeExpanded.value,parentId];clearSelection();if(stackMode==='reset')pathStack.value=[{id:'',name}];else if(stackMode==='push')pathStack.value.push({id:parentId,name})})}
-async function toggleTree(node){if(treeExpanded.value.includes(node.id)){treeExpanded.value=treeExpanded.value.filter(id=>id!==node.id);return}if(!Object.hasOwn(treeChildren.value,node.id)){try{const result=await api.listDrive(node.id);treeChildren.value={...treeChildren.value,[node.id]:(result.files||[]).filter(item=>item.kind==='drive#folder')}}catch(e){error.value=e.message||String(e);return}}treeExpanded.value=[...treeExpanded.value,node.id]}
-async function openTree({node,path}){await run(async()=>{mode.value='drive';share.value=null;files.value=(await api.listDrive(node.id)).files;treeChildren.value={...treeChildren.value,[node.id]:files.value.filter(item=>item.kind==='drive#folder')};pathStack.value=[{id:'',name:'全部文件'},...path.map(item=>({id:item.id,name:item.name}))];clearSelection()})}
+async function loadDrive(parentId='', name='全部文件',stackMode=parentId?'push':'reset'){await run(async()=>{mode.value='drive';share.value=null;files.value=(await api.listDrive(parentId)).files;clearSelection();if(stackMode==='reset')pathStack.value=[{id:'',name}];else if(stackMode==='push')pathStack.value.push({id:parentId,name})})}
 async function loadTrash(){await run(async()=>{mode.value='trash';share.value=null;files.value=(await api.listTrash()).files;clearSelection();pathStack.value=[{id:'trash',name:'回收站'}]})}
 async function loadStarred(){await run(async()=>{mode.value='starred';share.value=null;files.value=(await api.listStarred()).files;clearSelection();pathStack.value=[{id:'starred',name:'收藏'}]})}
 async function loadRecent(){await run(async()=>{mode.value='recent';share.value=null;files.value=(await api.listRecent()).files;clearSelection();pathStack.value=[{id:'recent',name:'最近'}]})}
@@ -448,7 +445,7 @@ function handleGlobalKeyDown(e){
     }
   }
 }
-watch([mode,pathStack,treeExpanded,treeChildren],persistNavigationState,{deep:true});
+watch([mode,pathStack],persistNavigationState,{deep:true});
 onMounted(async()=>{
   api.onDownload(upsertDownload);
   api.onUpload(upsertUpload);
