@@ -58,7 +58,7 @@ describe('image viewer',()=>{
     await new Promise(resolve=>setTimeout(resolve,0));
     expect(dom.window.document.querySelector('select[title="播放速度"]')).not.toBeNull();
     expect([...dom.window.document.querySelector('select[title="播放速度"]').options].map(option=>option.textContent)).toEqual(['0.5×','0.75×','1×','1.25×','1.5×','2×']);
-    expect([...dom.window.document.querySelectorAll('.video-tools > button')].filter(button=>!button.hidden).map(button=>button.textContent)).toEqual(['字幕','画中画','截图']);
+    expect([...dom.window.document.querySelectorAll('.video-tools > button')].filter(button=>!button.hidden).map(button=>button.textContent)).toEqual(['字幕','画中画','外部播放器','截图']);
     dom.window.document.querySelector('.video-tools button:not([hidden])').click();
     await new Promise(resolve=>setTimeout(resolve,0));
     expect(dom.window.document.querySelector('track').src).toBe('blob:subtitle');
@@ -88,11 +88,12 @@ describe('image viewer',()=>{
     dom.window.HTMLMediaElement.prototype.load=()=>{};
     dom.window.HTMLMediaElement.prototype.play=()=>Promise.resolve();
     dom.window.localStorage.setItem('pikpak-viewer-video-preferences-v1',JSON.stringify({autoNext:true}));
-    const resolved=[];
+    const resolved=[],opened=[];
     dom.window.viewerProgress={get:async()=>({time:0,duration:0}),set:async()=>true};
     dom.window.viewerPayload={
       get:async()=>({url:'https://cdn.test/one.mp4',name:'01.mp4',kind:'video',fileId:'drive:one',sources:[{url:'https://cdn.test/one.mp4',label:'720P'}],playlist:[{fileId:'drive:one',name:'01.mp4',url:'https://cdn.test/one.mp4',sources:[{url:'https://cdn.test/one.mp4',label:'720P'}]},{fileId:'drive:two',name:'02.mp4',url:'',sources:[]}]}),
-      resolveMedia:async fileId=>{resolved.push(fileId);return {url:'https://cdn.test/two.mp4',sources:[{url:'https://cdn.test/two.mp4',label:'1080P'}]}}
+      resolveMedia:async fileId=>{resolved.push(fileId);return {url:'https://cdn.test/two.mp4',sources:[{url:'https://cdn.test/two.mp4',label:'1080P'}]}},
+      openExternal:async fileId=>{opened.push(fileId);return true}
     };
     dom.window.eval(fs.readFileSync(new URL('../electron/viewer.js',import.meta.url),'utf8'));
     await new Promise(resolve=>setTimeout(resolve,0));
@@ -104,6 +105,9 @@ describe('image viewer',()=>{
     expect(dom.window.document.querySelector('video').src).toBe('https://cdn.test/two.mp4');
     expect(dom.window.document.title).toBe('02.mp4');
     expect(next.disabled).toBe(true);
+    [...dom.window.document.querySelectorAll('.video-tools button')].find(button=>button.textContent==='外部播放器').click();
+    await new Promise(resolve=>setTimeout(resolve,0));
+    expect(opened).toEqual(['drive:two']);
     const auto=[...dom.window.document.querySelectorAll('.video-tools button')].find(button=>button.textContent.startsWith('自动连播'));
     expect(auto.textContent).toBe('自动连播：开');
     auto.click();

@@ -227,23 +227,35 @@ function accountForStorage(account = {}, previous = {}, fallbackDeviceId = '', n
 }
 
 function extractCredentialsFromStorage(entries = {}) {
+  const findCredentials = (value, depth = 0, seen = new Set(), parentKey = '') => {
+    if (!value || typeof value !== 'object' || depth > 5 || seen.has(value)) return null;
+    seen.add(value);
+    const tokenContainer = /tokens?|credentials?|session/i.test(parentKey);
+    const refreshToken = String(value.refresh_token || value.refreshToken || (tokenContainer ? value.refresh : '') || '');
+    const accessToken = String(value.access_token || value.accessToken || (tokenContainer ? value.access : '') || '');
+    if (refreshToken || accessToken) {
+      return { refreshToken, accessToken, clientId: String(value.client_id || value.clientId || '') };
+    }
+    for (const [key, nested] of Object.entries(value)) {
+      if (nested && typeof nested === 'object') {
+        const found = findCredentials(nested, depth + 1, seen, key);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
   for (const [key, raw] of Object.entries(entries || {})) {
     if (typeof raw !== 'string' || raw.length < 20 || raw.length > 100000) continue;
-    if (!/[Tt]oken/.test(key) && !raw.includes('refresh_token') && !raw.includes('access_token')) continue;
+    if (!/token/i.test(key) && !/(?:refresh|access)_?token/i.test(raw) && !/"(?:tokens?|credentials?)"\s*:/i.test(raw)) continue;
     let value = raw;
     try {
       value = JSON.parse(raw);
       if (typeof value === 'string') value = JSON.parse(value);
     } catch { continue }
-    const source = value && typeof value === 'object' ? value : null;
-    if (!source) continue;
-    const refreshToken = String(source.refresh_token || source.refreshToken || '');
-    const accessToken = String(source.access_token || source.accessToken || '');
-    if (!refreshToken && !accessToken) continue;
+    const found = findCredentials(value);
+    if (!found) continue;
     return {
-      refreshToken,
-      accessToken,
-      clientId: String(source.client_id || source.clientId || ''),
+      ...found,
       storageKey: String(key)
     };
   }
@@ -256,6 +268,16 @@ function buildTokenRefreshBody({ refreshToken, clientId = '' } = {}) {
   const resolvedClientId = String(clientId || CLIENT_ID).trim();
   if (!resolvedClientId) throw new Error('缺少 client_id，无法刷新登录状态');
   return { client_id: resolvedClientId, grant_type: 'refresh_token', refresh_token: token, client_secret: '' };
+}
+
+function jwtExpiryMs(token) {
+  try {
+    const parts=String(token||'').split('.');
+    if(parts.length!==3)return 0;
+    const payload=JSON.parse(Buffer.from(parts[1],'base64url').toString('utf8'));
+    const seconds=Number(payload?.exp||0);
+    return Number.isFinite(seconds)&&seconds>0?Math.floor(seconds*1000):0;
+  } catch { return 0 }
 }
 
 function decodeSubtitleBytes(input) {
@@ -275,4 +297,4 @@ function playbackSourcesFromFile(file = {}) {
   const seen=new Set();return values.filter(source=>/^https?:\/\//i.test(source.url)&&!seen.has(source.url)&&seen.add(source.url));
 }
 
-module.exports = { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, matchSubtitles, detectConflicts, generateUniqueName, buildInterruptedDownloadOptions, isValidDeviceId, accountForStorage, extractCredentialsFromStorage, buildTokenRefreshBody, decodeSubtitleBytes, playbackSourcesFromFile };
+module.exports = { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, matchSubtitles, detectConflicts, generateUniqueName, buildInterruptedDownloadOptions, isValidDeviceId, accountForStorage, extractCredentialsFromStorage, buildTokenRefreshBody, jwtExpiryMs, decodeSubtitleBytes, playbackSourcesFromFile };

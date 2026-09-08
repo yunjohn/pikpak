@@ -13,5 +13,6 @@ contextBridge.exposeInMainWorld('viewerPayload', {
   decodeSubtitle: bytes => ipcRenderer.invoke('viewer:subtitle-decode', bytes),
   resolveMedia: fileId => ipcRenderer.invoke('viewer:media-resolve', String(fileId || '')),
   refreshMedia: fileId => ipcRenderer.invoke('viewer:media-refresh', String(fileId || '')),
+  openExternal: fileId => ipcRenderer.invoke('viewer:open-external', String(fileId || '')),
   capture: payload => ipcRenderer.invoke('viewer:capture', payload)
 });

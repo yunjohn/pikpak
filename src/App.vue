@@ -4,7 +4,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 const api = window.pikpak || {
   getAccount: async()=>({connected:false}), getAccountAbout:async()=>({quota:null}), onAccountExpired:()=>()=>{}, setAccessToken:async token=>({connected:!!token}), login:async()=>({connected:false}), logout:async()=>({connected:false}),
   listDrive:async()=>({files:demoFiles}), searchDrive:async()=>({files:[],scanned:0,folders:0}), cancelSearch:async()=>true, onSearchProgress:()=>()=>{}, getDriveFile:async()=>({}), listStarred:async()=>({files:[]}), listRecent:async()=>({files:[]}), listMyShares:async()=>({files:[]}), copyShare:async()=>'', cancelShares:async()=>({}), setStarred:async()=>({}), openShare:async()=>({share:{shareId:'demo'},files:demoFiles}),
-  getShareFile:async()=>({}), restoreShare:async()=>({}), createShare:async()=>({shareUrl:'https://mypikpak.com/s/demo',passCode:'1234'}), createOfflineTask:async()=>({}), listOfflineTasks:async()=>({tasks:[]}), deleteOfflineTask:async()=>({}), createFolder:async()=>({}), rename:async()=>({}), trash:async()=>({}), transfer:async()=>({}), listTrash:async()=>({files:[]}), restoreTrash:async()=>({}), deleteTrash:async()=>({}), startDownload:async payload=>({id:'demo',name:payload.name,state:'queued'}), openViewer:async()=>true, listArchive:async()=>({items:[]}), chooseUpload:async()=>[], chooseUploadFolder:async()=>[], uploadDroppedFiles:async()=>[], cancelUpload:async()=>false, retryUpload:async()=>({}), listUploads:async()=>[], removeUpload:async()=>[], clearUploads:async()=>[], getSettings:async()=>({downloadDirectory:'',effectiveDownloadDirectory:'',downloadConcurrency:3,uploadConcurrency:3}),  chooseDownloadDirectory:async()=>'', saveSettings:async value=>value, resetSettings:async()=>({downloadDirectory:'',effectiveDownloadDirectory:'',downloadConcurrency:3,uploadConcurrency:3}), exportDiagnostics:async()=>({}), clearAppCache:async()=>true, onUpload:()=>()=>{}, cancelDownload:async()=>true, retryDownload:async()=>({}), showDownload:async()=>true, listDownloads:async()=>[], removeDownload:async()=>[], clearDownloads:async()=>[], onDownload:()=>()=>{}
+  getShareFile:async()=>({}), restoreShare:async()=>({}), createShare:async()=>({shareUrl:'https://mypikpak.com/s/demo',passCode:'1234'}), createOfflineTask:async()=>({}), listOfflineTasks:async()=>({tasks:[]}), deleteOfflineTask:async()=>({}), createFolder:async()=>({}), rename:async()=>({}), trash:async()=>({}), transfer:async()=>({}), listTrash:async()=>({files:[]}), restoreTrash:async()=>({}), deleteTrash:async()=>({}), startDownload:async payload=>({id:'demo',name:payload.name,state:'queued'}), openViewer:async()=>true, listArchive:async()=>({items:[]}), chooseUpload:async()=>[], chooseUploadFolder:async()=>[], uploadDroppedFiles:async()=>[], cancelUpload:async()=>false, retryUpload:async()=>({}), listUploads:async()=>[], removeUpload:async()=>[], clearUploads:async()=>[], getSettings:async()=>({downloadDirectory:'',effectiveDownloadDirectory:'',downloadConcurrency:3,uploadConcurrency:3,externalPlayerPath:''}), chooseDownloadDirectory:async()=>'', chooseExternalPlayer:async()=>'', saveSettings:async value=>value, resetSettings:async()=>({downloadDirectory:'',effectiveDownloadDirectory:'',downloadConcurrency:3,uploadConcurrency:3,externalPlayerPath:''}), exportDiagnostics:async()=>({}), clearAppCache:async()=>true, onUpload:()=>()=>{}, cancelDownload:async()=>true, retryDownload:async()=>({}), showDownload:async()=>true, listDownloads:async()=>[], removeDownload:async()=>[], clearDownloads:async()=>[], onDownload:()=>()=>{}
 };
 const demoFiles = [
   {id:'demo-folder',kind:'drive#folder',name:'示例目录',modified_time:new Date().toISOString()},
@@ -13,7 +13,7 @@ const demoFiles = [
 const mode=ref('drive'), files=ref([]), selected=ref(null), selectedIds=ref([]), loading=ref(false), error=ref(''), notice=ref('');
 const shareUrl=ref(''), share=ref(null), account=ref({connected:false}), quota=ref(null), token=ref('');
 const downloads=ref([]);
-const settings=ref({downloadDirectory:'',effectiveDownloadDirectory:'',downloadConcurrency:3,uploadConcurrency:3});
+const settings=ref({downloadDirectory:'',effectiveDownloadDirectory:'',downloadConcurrency:3,uploadConcurrency:3,externalPlayerPath:''});
 const uploads=ref([]);
 const offlineTasks=ref([]), offlineUrl=ref('');
 const thumbFailed=ref({});
@@ -219,6 +219,7 @@ async function removeUpload(id){uploads.value=await api.removeUpload(id)}
 async function retryUploadTask(id){try{const task=await api.retryUpload(id);upsertUpload(task)}catch(e){error.value=e.message||String(e)}}
 async function retryDownloadTask(id){try{const task=await api.retryDownload(id);upsertDownload(task)}catch(e){error.value=e.message||String(e)}}
 async function chooseDownloadDirectory(){const value=await api.chooseDownloadDirectory();if(value)settings.value.downloadDirectory=value}
+async function chooseExternalPlayer(){const value=await api.chooseExternalPlayer();if(value)settings.value.externalPlayerPath=value}
 async function persistSettings(){try{settings.value=await api.saveSettings(settings.value);notice.value='设置已保存';setTimeout(()=>{notice.value=''},2500)}catch(e){error.value=e.message||String(e)}}
 async function resetSettingsToDefault(){if(!window.confirm('确定将所有设置恢复为默认值吗？'))return;try{settings.value=await api.resetSettings();notice.value='已恢复默认设置';setTimeout(()=>{notice.value=''},2500)}catch(e){error.value=e.message||String(e)}}
 async function clearAllDataCache(){if(!window.confirm('确定要清理本机的下载历史、上传历史、播放进度和会话缓存吗？云端网盘文件不会受到影响。'))return;try{await api.clearAppCache();downloads.value=[];uploads.value=[];notice.value='已清理本机缓存与传输历史记录';setTimeout(()=>{notice.value=''},3000)}catch(e){error.value=e.message||String(e)}}
@@ -548,6 +549,7 @@ onUnmounted(()=>{
       <section v-else-if="mode==='settings'" class="settings-panel">
         <h2>传输设置</h2><p>设置会保存在当前 Windows 用户中，重启客户端后继续生效。</p>
         <label><span><b>默认下载目录</b><small>{{settings.downloadDirectory||settings.effectiveDownloadDirectory||'系统下载目录'}}</small></span><button class="soft" @click="chooseDownloadDirectory">选择目录</button></label>
+        <label><span><b>外部播放器</b><small>{{settings.externalPlayerPath||'未设置（可选择 PotPlayer、VLC 或 MPC）'}}</small></span><button class="soft" @click="chooseExternalPlayer">选择 EXE</button></label>
         <label><span><b>同时下载任务数</b><small>范围 1–8</small></span><input v-model.number="settings.downloadConcurrency" type="number" min="1" max="8"></label>
         <label><span><b>同时上传任务数</b><small>范围 1–8</small></span><input v-model.number="settings.uploadConcurrency" type="number" min="1" max="8"></label>
         <h2>快捷键指南</h2><p>客户端支持完整的桌面快捷键与键盘无障碍操作：</p>

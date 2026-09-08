@@ -2,7 +2,8 @@ const { app, BrowserWindow, clipboard, dialog, ipcMain, powerSaveBlocker, safeSt
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
-const { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, buildInterruptedDownloadOptions, isValidDeviceId, accountForStorage, extractCredentialsFromStorage, buildTokenRefreshBody, decodeSubtitleBytes, playbackSourcesFromFile } = require('./core.cjs');
+const { spawn } = require('node:child_process');
+const { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, buildInterruptedDownloadOptions, isValidDeviceId, accountForStorage, extractCredentialsFromStorage, buildTokenRefreshBody, jwtExpiryMs, decodeSubtitleBytes, playbackSourcesFromFile } = require('./core.cjs');
 const { logger } = require('./logger.cjs');
 
 process.on('uncaughtException', err => logger.error('process', 'Uncaught exception', err?.stack || err));
@@ -16,7 +17,6 @@ let proactiveRefreshTimer = null;
 let programmaticRefreshPromise = null;
 let loginWindow = null;
 let loginCompletion = null;
-let loginCredentialTimer = null;
 let authRefreshWindow = null;
 let authRefreshPromise = null;
 const authRefreshWaiters = new Set();
@@ -40,7 +40,7 @@ let uploadHistory = [];
 let uploadSaveTimer = null;
 let playbackHistory = {};
 let playbackSaveTimer = null;
-let settings = { downloadDirectory:'', downloadConcurrency:3, uploadConcurrency:3 };
+let settings = { downloadDirectory:'', downloadConcurrency:3, uploadConcurrency:3, externalPlayerPath:'' };
 
 function updatePlaybackPowerBlocker(){
   if(playingViewers.size&&playbackPowerBlocker===null)playbackPowerBlocker=powerSaveBlocker.start('prevent-display-sleep');
@@ -69,7 +69,7 @@ function clearAccount() {
 function scheduleProactiveRefresh(delayMs) {
   const delay = Math.max(30000, Number(delayMs) || 0);
   if (proactiveRefreshTimer) clearTimeout(proactiveRefreshTimer);
-  proactiveRefreshTimer = setTimeout(() => { proactiveRefreshTimer = null; refreshAccessToken().catch(()=>{}); }, delay);
+  proactiveRefreshTimer = setTimeout(async() => { proactiveRefreshTimer = null; try{const refreshed=await refreshAccessToken();if(!refreshed)await refreshOfficialAuth()}catch{} }, delay);
   logger.info('auth', 'Proactive token refresh scheduled', { inMinutes: Math.round(delay / 60000) });
 }
 function rememberTokenExpiry(expiresIn) {
@@ -114,18 +114,28 @@ async function captureStoredCredentials(webContents) {
   try {
     const currentUrl = new URL(webContents.getURL());
     if (currentUrl.protocol !== 'https:' || (currentUrl.hostname !== 'mypikpak.com' && !currentUrl.hostname.endsWith('.mypikpak.com'))) return;
-    const entries = await webContents.executeJavaScript(`(()=>{try{const found={};for(let i=0;i<localStorage.length&&i<200;i++){const key=localStorage.key(i)||'';const value=localStorage.getItem(key)||'';if(value.length>=20&&value.length<=100000&&(/[Tt]oken/.test(key)||value.includes('refresh_token')||value.includes('access_token')))found[key]=value}return found}catch{return {}}})()`, true);
+    const entries = await webContents.executeJavaScript(`(()=>{try{const found={};for(let i=0;i<localStorage.length&&i<200;i++){const key=localStorage.key(i)||'';const value=localStorage.getItem(key)||'';if(value.length>=20&&value.length<=100000&&(/token/i.test(key)||/(?:refresh|access)_?token/i.test(value)))found[key]=value}return found}catch{return {}}})()`, true);
     const found = extractCredentialsFromStorage(entries || {});
     if (found?.refreshToken || found?.accessToken) {
-      const current = readAccount();
-      const accessToken=found.accessToken.length>20?found.accessToken:current.accessToken;
-      writeAccount({ ...current, accessToken, refreshToken: found.refreshToken || current.refreshToken, clientId: found.clientId || current.clientId, source:current.source||'web-login', updatedAt: Date.now() });
-      logger.info('auth', 'Credentials captured from page storage', { storageKey: found.storageKey, hasAccessToken:Boolean(found.accessToken), hasRefreshToken:Boolean(found.refreshToken) });
-      if(found.accessToken.length>20){for(const waiter of authRefreshWaiters)if(found.accessToken!==waiter.previous){authRefreshWaiters.delete(waiter);waiter.resolve(true)}if(loginCompletion){const done=loginCompletion;loginCompletion=null;done(accountStatus());setTimeout(()=>{if(loginWindow&&!loginWindow.isDestroyed())loginWindow.close()},300)}}
+      await acceptLoginCredentials(found, `page-storage:${found.storageKey}`);
     }
   } catch {}
 }
-function startLoginCredentialCapture(win){if(loginCredentialTimer)clearInterval(loginCredentialTimer);const capture=()=>{if(!win||win.isDestroyed()){clearInterval(loginCredentialTimer);loginCredentialTimer=null;return}captureStoredCredentials(win.webContents)};setTimeout(capture,500);loginCredentialTimer=setInterval(capture,1500)}
+async function acceptLoginCredentials(found, captureSource='web-login'){
+  const current=readAccount();
+  const foundAccessToken=String(found?.accessToken||'');
+  const foundRefreshToken=String(found?.refreshToken||'');
+  const accessToken=foundAccessToken.length>20?foundAccessToken:current.accessToken;
+  writeAccount({...current,accessToken,refreshToken:foundRefreshToken||current.refreshToken,clientId:String(found?.clientId||current.clientId||''),source:'web-login',updatedAt:Date.now()});
+  logger.info('auth','Login credentials received',{captureSource,hasAccessToken:foundAccessToken.length>20,hasRefreshToken:foundRefreshToken.length>20});
+  if(foundAccessToken.length<=20&&foundRefreshToken.length>20)await refreshAccessToken();
+  const capturedAccessToken=String(readAccount().accessToken||'');
+  if(capturedAccessToken.length<=20)return false;
+  for(const waiter of authRefreshWaiters)if(capturedAccessToken!==waiter.previous){authRefreshWaiters.delete(waiter);waiter.resolve(true)}
+  if(loginCompletion){const done=loginCompletion;loginCompletion=null;done(accountStatus());setTimeout(()=>{if(loginWindow&&!loginWindow.isDestroyed())loginWindow.close()},300)}
+  logger.info('auth','Login completed',{captureSource});
+  return true;
+}
 function parseUploadedTokenRequest(uploadData) {
   try {
     const raw = (Array.isArray(uploadData) ? uploadData : []).map(entry => {
@@ -211,18 +221,23 @@ function installPikPakSessionCapture() {
     if(capturedCaptcha)captcha={token:capturedCaptcha,action:'',expiresAt:Date.now()+240000};
     if(auth.length>20){
       const accessToken=auth.replace(/^Bearer\s+/i,'');
-      writeAccount({accessToken,source:'web-login',updatedAt:Date.now()});
+      const tokenExpiresAt=jwtExpiryMs(accessToken);
+      writeAccount({accessToken,tokenExpiresAt,source:'web-login',updatedAt:Date.now()});
+      if(tokenExpiresAt>Date.now())scheduleProactiveRefresh(Math.max(30000,tokenExpiresAt-Date.now()-5*60*1000));
       for(const waiter of authRefreshWaiters)if(accessToken!==waiter.previous){authRefreshWaiters.delete(waiter);waiter.resolve(true)}
-      if(loginCompletion){const done=loginCompletion;loginCompletion=null;done(accountStatus());setTimeout(()=>{if(loginWindow&&!loginWindow.isDestroyed())loginWindow.close()},500)}
+      if(loginCompletion){const done=loginCompletion,capturedWindow=loginWindow;loginCompletion=null;done(accountStatus());setTimeout(async()=>{if(capturedWindow&&!capturedWindow.isDestroyed())await captureStoredCredentials(capturedWindow.webContents);if(capturedWindow&&!capturedWindow.isDestroyed())capturedWindow.close()},1000)}
     }
     callback({requestHeaders:headers});
   });
-  pikpakSession.webRequest.onBeforeRequest({urls:['https://user.mypikpak.com/v1/auth/token']},details=>{
-    const parsed=parseUploadedTokenRequest(details?.uploadData);
-    if(!parsed)return;
-    const current=readAccount();
-    writeAccount({accessToken:current.accessToken,refreshToken:parsed.refreshToken,clientId:parsed.clientId||current.clientId,source:current.source||'web-login',updatedAt:Date.now()});
-    logger.info('auth','Refresh token captured from official token request');
+  pikpakSession.webRequest.onBeforeRequest({urls:['https://user.mypikpak.com/v1/auth/token']},(details,callback)=>{
+    try{
+      const parsed=parseUploadedTokenRequest(details?.uploadData);
+      if(parsed){
+        const current=readAccount();
+        writeAccount({accessToken:current.accessToken,refreshToken:parsed.refreshToken,clientId:parsed.clientId||current.clientId,source:current.source||'web-login',updatedAt:Date.now()});
+        logger.info('auth','Refresh token captured from official token request');
+      }
+    }finally{callback({})}
   });
 }
 function refreshOfficialAuth(){
@@ -242,8 +257,7 @@ function openLoginWindow(){
   if(loginWindow&&!loginWindow.isDestroyed()){loginWindow.focus();return}
   loginWindow=new BrowserWindow({width:1080,height:760,minWidth:760,minHeight:560,title:'登录 PikPak',autoHideMenuBar:true,webPreferences:{session:session.fromPartition('persist:pikpak-login'),contextIsolation:true,nodeIntegration:false}});
   loginWindow.loadURL('https://mypikpak.com/drive/all');
-  loginWindow.webContents.on('did-finish-load',()=>startLoginCredentialCapture(loginWindow));
-  loginWindow.on('closed',()=>{if(loginCredentialTimer){clearInterval(loginCredentialTimer);loginCredentialTimer=null}loginWindow=null;if(loginCompletion){const done=loginCompletion;loginCompletion=null;done(accountStatus())}});
+  loginWindow.on('closed',()=>{loginWindow=null;if(loginCompletion){const done=loginCompletion;loginCompletion=null;done(accountStatus())}});
 }
 
 function safeFilename(value) {
@@ -251,7 +265,7 @@ function safeFilename(value) {
   return name || 'download';
 }
 function settingsPath(){return path.join(app.getPath('userData'),'settings.json')}
-function normalizeSettings(value={}){const directory=String(value.downloadDirectory||'');return {downloadDirectory:directory&&fs.existsSync(directory)?directory:'',downloadConcurrency:Math.max(1,Math.min(8,Math.round(Number(value.downloadConcurrency)||3))),uploadConcurrency:Math.max(1,Math.min(8,Math.round(Number(value.uploadConcurrency)||3)))}}
+function normalizeSettings(value={}){const directory=String(value.downloadDirectory||''),externalPlayerPath=String(value.externalPlayerPath||'');return {downloadDirectory:directory&&fs.existsSync(directory)?directory:'',downloadConcurrency:Math.max(1,Math.min(8,Math.round(Number(value.downloadConcurrency)||3))),uploadConcurrency:Math.max(1,Math.min(8,Math.round(Number(value.uploadConcurrency)||3))),externalPlayerPath:externalPlayerPath&&/\.exe$/i.test(externalPlayerPath)&&fs.existsSync(externalPlayerPath)?externalPlayerPath:''}}
 function loadSettings(){try{settings=normalizeSettings(JSON.parse(fs.readFileSync(settingsPath(),'utf8')))}catch{settings=normalizeSettings()}}
 function saveSettings(){const target=settingsPath();fs.mkdirSync(path.dirname(target),{recursive:true});fs.writeFileSync(target,JSON.stringify(settings,null,2))}
 function uniqueDownloadPath(name, subDir = '') {
@@ -623,6 +637,7 @@ ipcMain.handle('download:start',(_,{url,name,subDir=''})=>{
 });
 ipcMain.handle('settings:get',()=>({...settings,effectiveDownloadDirectory:settings.downloadDirectory||app.getPath('downloads')}));
 ipcMain.handle('settings:choose-download-dir',async()=>{const picked=await dialog.showOpenDialog(mainWindow||undefined,{title:'选择默认下载目录',properties:['openDirectory','createDirectory']});return picked.canceled?'':picked.filePaths[0]||''});
+ipcMain.handle('settings:choose-external-player',async()=>{const picked=await dialog.showOpenDialog(mainWindow||undefined,{title:'选择外部播放器',properties:['openFile'],filters:[{name:'Windows 应用程序',extensions:['exe']}]});return picked.canceled?'':picked.filePaths[0]||''});
 ipcMain.handle('settings:set',(_,value)=>{settings=normalizeSettings(value);saveSettings();scheduleDownloads();scheduleUploads();return {...settings,effectiveDownloadDirectory:settings.downloadDirectory||app.getPath('downloads')}});
 ipcMain.handle('settings:reset',()=>{settings=normalizeSettings({});saveSettings();logger.info('settings','Settings reset to default');scheduleDownloads();scheduleUploads();return {...settings,effectiveDownloadDirectory:settings.downloadDirectory||app.getPath('downloads')}});
 ipcMain.handle('app:export-diagnostics',async()=>{logger.info('app','Exporting diagnostics report');return logger.buildDiagnostics({appVersion:app.getVersion(),account:accountStatus(),settings:{...settings,effectiveDownloadDirectory:settings.downloadDirectory||app.getPath('downloads')},transferStats:{activeDownloads,queuedDownloads:downloadQueue.length,totalDownloadsRecorded:downloadHistory.length,activeUploads,queuedUploads:uploadQueue.length,totalUploadsRecorded:uploadHistory.length}})});
@@ -674,6 +689,7 @@ ipcMain.handle('viewer:subtitle-choose',async event=>{const win=viewerFor(event)
 ipcMain.handle('viewer:subtitle-decode',(event,input)=>{viewerFor(event);const bytes=Buffer.from(input||[]);if(bytes.length>10*1024*1024)throw new Error('字幕文件不能超过 10 MB');return decodeSubtitleBytes(bytes)});
 ipcMain.handle('viewer:media-resolve',async(event,requestedFileId)=>{const entry=viewerEntryFor(event),progressId=String(requestedFileId||''),playlistEntry=(entry.payload.playlist||[]).find(item=>item.fileId===progressId);if(!playlistEntry)throw new Error('该视频不在当前播放列表中');if(playlistEntry.sources?.length)return {url:playlistEntry.url||playlistEntry.sources[0].url,sources:playlistEntry.sources};const result=await resolveViewerMedia(progressId);playlistEntry.url=result.url;playlistEntry.sources=result.sources;return result});
 ipcMain.handle('viewer:media-refresh',async(event,requestedFileId='')=>{const entry=viewerEntryFor(event),progressId=String(requestedFileId||entry.payload.fileId||'');if(progressId!==entry.payload.fileId&&!(entry.payload.playlist||[]).some(item=>item.fileId===progressId))throw new Error('该视频不在当前播放列表中');const result=await resolveViewerMedia(progressId),playlistEntry=(entry.payload.playlist||[]).find(item=>item.fileId===progressId);if(playlistEntry){playlistEntry.url=result.url;playlistEntry.sources=result.sources}if(progressId===entry.payload.fileId){entry.payload.url=result.url;entry.payload.sources=result.sources}return result});
+ipcMain.handle('viewer:open-external',async(event,requestedFileId='')=>{const entry=viewerEntryFor(event),progressId=String(requestedFileId||entry.payload.fileId||'');if(!settings.externalPlayerPath)throw new Error('请先在主界面“设置”中选择外部播放器');if(!/\.exe$/i.test(settings.externalPlayerPath)||!fs.existsSync(settings.externalPlayerPath))throw new Error('外部播放器路径已失效，请重新选择');let media=progressId===entry.payload.fileId?entry.payload:(entry.payload.playlist||[]).find(item=>item.fileId===progressId);if(!media)throw new Error('该视频不在当前播放列表中');if(!/^https?:\/\//i.test(String(media.url||''))){const resolved=await resolveViewerMedia(progressId);media.url=resolved.url;media.sources=resolved.sources}const child=spawn(settings.externalPlayerPath,[String(media.url)],{detached:true,stdio:'ignore',windowsHide:false});await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',reject)});child.unref();logger.info('viewer','Opened media in configured external player',{player:path.basename(settings.externalPlayerPath),fileId:progressId});return true});
 ipcMain.handle('viewer:capture',async(event,payload={})=>{const win=viewerFor(event),rect=payload.rect||{},width=Math.max(1,Math.floor(Number(rect.width)||1)),height=Math.max(1,Math.floor(Number(rect.height)||1)),x=Math.max(0,Math.floor(Number(rect.x)||0)),y=Math.max(0,Math.floor(Number(rect.y)||0));if(width>10000||height>10000)throw new Error('截图区域无效');const image=await win.webContents.capturePage({x,y,width,height}),base=String(payload.name||'视频').replace(/[<>:"/\\|?*\x00-\x1f]/g,'_').slice(0,120),stamp=new Date().toISOString().replace(/[:.]/g,'-'),saved=await dialog.showSaveDialog(win,{title:'保存视频截图',defaultPath:`${base}-${stamp}.png`,filters:[{name:'PNG 图片',extensions:['png']}]});if(saved.canceled||!saved.filePath)return '';await fs.promises.writeFile(saved.filePath,image.toPNG());return saved.filePath});
 ipcMain.handle('viewer:progress-get',(_,fileId)=>{const id=String(fileId||'');return id&&playbackHistory[id]?playbackHistory[id]:{time:0,duration:0}});
 ipcMain.handle('viewer:progress-set',(_,payload)=>{const id=String(payload?.fileId||''),time=Number(payload?.time||0),duration=Number(payload?.duration||0);if(!id||!Number.isFinite(time)||time<0||!Number.isFinite(duration)||duration<0)return false;if(time===0||duration-time<8)delete playbackHistory[id];else playbackHistory[id]={time:Math.min(time,duration||time),duration,updatedAt:Date.now()};clearTimeout(playbackSaveTimer);playbackSaveTimer=setTimeout(flushPlaybackHistory,500);return true});

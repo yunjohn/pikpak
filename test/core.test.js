@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
-const { CLIENT_ID, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, matchSubtitles, detectConflicts, generateUniqueName, isValidDeviceId, accountForStorage, extractCredentialsFromStorage, buildTokenRefreshBody, decodeSubtitleBytes, playbackSourcesFromFile } = require('../electron/core.cjs');
+const { CLIENT_ID, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, matchSubtitles, detectConflicts, generateUniqueName, isValidDeviceId, accountForStorage, extractCredentialsFromStorage, buildTokenRefreshBody, jwtExpiryMs, decodeSubtitleBytes, playbackSourcesFromFile } = require('../electron/core.cjs');
 
 describe('desktop core', () => {
   it('normalizes refreshed playback sources and removes duplicate URLs', () => {
@@ -28,6 +28,8 @@ describe('desktop core', () => {
     const found=extractCredentialsFromStorage({theme:'dark',authToken:JSON.stringify({refresh_token:'refresh-token-value-1234567890',access_token:'access-token-value',client_id:'web-client'})});
     expect(found).toEqual({refreshToken:'refresh-token-value-1234567890',accessToken:'access-token-value',clientId:'web-client',storageKey:'authToken'});
     expect(extractCredentialsFromStorage({session:JSON.stringify({access_token:'access-token-value-1234567890'})})).toMatchObject({accessToken:'access-token-value-1234567890'});
+    expect(extractCredentialsFromStorage({persistedAuth:JSON.stringify({state:{session:{refreshToken:'nested-refresh-token-value-1234567890',clientId:'nested-client'}}})})).toMatchObject({refreshToken:'nested-refresh-token-value-1234567890',clientId:'nested-client'});
+    expect(extractCredentialsFromStorage({sdkSession:JSON.stringify({credentials:{tokens:{access:'nested-access-token-value-1234567890',refresh:'nested-refresh-token-value-1234567890'}}})})).toMatchObject({accessToken:'nested-access-token-value-1234567890',refreshToken:'nested-refresh-token-value-1234567890'});
     expect(extractCredentialsFromStorage({authToken:'not-json-refresh_token'})).toBeNull();
     expect(extractCredentialsFromStorage({authToken:'x'.repeat(100001)})).toBeNull();
   });
@@ -36,6 +38,13 @@ describe('desktop core', () => {
     expect(buildTokenRefreshBody({refreshToken:' refresh-token '})).toEqual({client_id:CLIENT_ID,grant_type:'refresh_token',refresh_token:'refresh-token',client_secret:''});
     expect(buildTokenRefreshBody({refreshToken:'refresh-token',clientId:' custom-client '})).toMatchObject({client_id:'custom-client'});
     expect(()=>buildTokenRefreshBody({})).toThrow(/refresh_token/);
+  });
+
+  it('reads expiry from a JWT access token without accepting malformed values', () => {
+    const payload=Buffer.from(JSON.stringify({exp:1893456000})).toString('base64url');
+    expect(jwtExpiryMs(`header.${payload}.signature`)).toBe(1893456000000);
+    expect(jwtExpiryMs('opaque-token')).toBe(0);
+    expect(jwtExpiryMs('a.invalid-json.c')).toBe(0);
   });
 
   it('detects name conflicts case-insensitively and separates non-conflicts', () => {

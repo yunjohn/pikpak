@@ -43,6 +43,7 @@ contextBridge.exposeInMainWorld('pikpak', {
   clearUploads: () => ipcRenderer.invoke('upload:clear'),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   chooseDownloadDirectory: () => ipcRenderer.invoke('settings:choose-download-dir'),
+  chooseExternalPlayer: () => ipcRenderer.invoke('settings:choose-external-player'),
   saveSettings: value => ipcRenderer.invoke('settings:set', value),
   resetSettings: () => ipcRenderer.invoke('settings:reset'),
   exportDiagnostics: () => ipcRenderer.invoke('app:export-diagnostics'),
