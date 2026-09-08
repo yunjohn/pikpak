@@ -45,6 +45,83 @@ function buildOfflineTaskPayload(value,parentId='') {
   const target=String(parentId||'').trim();if(target)payload.parent_id=target;else payload.folder_type='DOWNLOAD';
   return payload;
 }
+
+// Extracts a usable magnet link from arbitrary clipboard text (or null).
+function findMagnetLink(text) {
+  const source = String(text || '');
+  const match = source.match(/magnet:\?[^\s<>"']+/i);
+  if (!match) return null;
+  const uri = match[0].replace(/[\]\[(){}（）【】《》，。；;！!？?、]+$/u, '');
+  return /[?&]xt=urn:[A-Za-z0-9]+:[A-Za-z0-9]+/i.test(uri) ? uri : null;
+}
+
+function magnetIdentity(uri) {
+  const magnet = findMagnetLink(uri);
+  if (!magnet) return '';
+  try {
+    const xt = new URL(magnet).searchParams.getAll('xt').find(value => /^urn:[A-Za-z0-9]+:[A-Za-z0-9]+$/i.test(value));
+    return xt ? xt.toLowerCase() : '';
+  } catch { return ''; }
+}
+
+function decodeHtmlText(value) {
+  return String(value||'').replace(/<[^>]*>/g,' ').replace(/&(?:amp|#38);/gi,'&').replace(/&(?:quot|#34);/gi,'"').replace(/&(?:apos|#39);/gi,"'").replace(/&(?:lt|#60);/gi,'<').replace(/&(?:gt|#62);/gi,'>').replace(/&#(\d+);/g,(_,n)=>String.fromCodePoint(Number(n))).replace(/\s+/g,' ').trim();
+}
+function parseExternalSearchHtml(html) {
+  const source=String(html||''),results=[],seen=new Set(),magnetPattern=/magnet:\?[^\s<>"']+/ig;
+  const rows=[...source.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/ig)].map(value=>value[1]);
+  for(const row of rows){
+    const rawMagnet=row.match(magnetPattern)?.[0],magnet=findMagnetLink(String(rawMagnet||'').replace(/&amp;/gi,'&').replace(/&#38;/g,'&')),key=magnetIdentity(magnet);if(!magnet||!key||seen.has(key))continue;
+    const links=[...row.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/ig)].map(value=>{const attrs=value[1],href=attrs.match(/\bhref=["']([^"']*)["']/i)?.[1]||'',title=attrs.match(/\btitle=["']([^"']*)["']/i)?.[1]||'';return {href,title:decodeHtmlText(title||value[2])}});
+    const titleLink=links.find(link=>/\/view\//i.test(link.href))||links.find(link=>link.title&&!/^magnet:/i.test(link.href)&&!/\.torrent(?:[?#]|$)/i.test(link.href));
+    seen.add(key);results.push({title:titleLink?.title||`磁力资源 ${results.length+1}`,magnet,key});
+  }
+  if(results.length)return results;
+  for(const match of source.matchAll(magnetPattern)){
+    const magnet=findMagnetLink(match[0].replace(/&amp;/gi,'&').replace(/&#38;/g,'&')),key=magnetIdentity(magnet);if(!magnet||!key||seen.has(key))continue;
+    const near=source.slice(Math.max(0,match.index-2000),match.index);
+    const candidates=[...near.matchAll(/<(?:h[1-6]|a|strong|b)[^>]*(?:title=["']([^"']+)["'])?[^>]*>([\s\S]*?)<\/(?:h[1-6]|a|strong|b)>/ig)].map(value=>decodeHtmlText(value[1]||value[2])).filter(value=>value&&!/^magnet:/i.test(value)&&!/^(?:下载|磁力|复制|详情|立即下载)$/i.test(value));
+    seen.add(key);results.push({title:candidates.at(-1)||`磁力资源 ${results.length+1}`,magnet,key});
+  }
+  return results;
+}
+
+// Central, testable model for an offline download task's status.
+// `phase` values come from PikPak (e.g. PHASE_TYPE_RUNNING / COMPLETE / ERROR /
+// PAUSED / PENDING); we classify by substring so minor value changes don't break the UI.
+function offlineTaskState(task = {}) {
+  const phase = String(task?.phase || '').toUpperCase();
+  const raw = Number(task?.progress ?? task?.progress_percent ?? 0);
+  const percent = Math.max(0, Math.min(100, Math.round(raw > 0 && raw <= 1 ? raw * 100 : raw)));
+  let state, label;
+  if (phase.includes('COMPLETE')) { state = 'completed'; label = '已完成'; }
+  else if (phase.includes('ERROR') || phase.includes('FAILED')) { state = 'failed'; label = '失败'; }
+  else if (phase.includes('PAUSED')) { state = 'paused'; label = '已暂停'; }
+  else if (phase.includes('RUNNING')) { state = 'running'; label = '下载中'; }
+  else { state = 'waiting'; label = '等待中'; }
+  return {
+    state, label, percent,
+    isTerminal: state === 'completed' || state === 'failed',
+    // A failed task can be retried by re-submitting its source URL (create endpoint).
+    canRetry: state === 'failed'
+  };
+}
+
+// Builds the request descriptor for an offline task action. The only action verified
+// against the real API is `delete`. The open-source PikPak clients (rclone, AList,
+// pikpak-js-sdk) expose create/list/delete for offline tasks but no pause / resume /
+// retry control endpoint; do not guess it. Once a real-account capture of the official
+// client confirms how it pauses/resumes/retries, add that here in one place.
+function buildOfflineTaskAction(action, id) {
+  const taskId = String(id || '').trim();
+  if (!taskId) throw new Error('缺少离线任务 ID');
+  const value = String(action || '').toLowerCase();
+  if (value === 'delete') {
+    return { method: 'DELETE', path: '/drive/v1/tasks', query: { task_ids: taskId, delete_files: 'false' }, body: undefined };
+  }
+  throw new Error(`离线任务操作「${value}」暂未实现：需先在真实账号下核对 PikPak 对应接口`);
+}
+
 function normalizeQuota(data) {
   const used=Number(data?.quota?.usage), limit=Number(data?.quota?.limit);
   if(!Number.isFinite(used)||!Number.isFinite(limit)||limit<=0)return null;
@@ -64,6 +141,13 @@ function recentFilesFromEvents(events) {
 }
 function normalizeIds(values) {
   return Array.from(new Set((Array.isArray(values)?values:[values]).map(value=>String(value||'').trim()).filter(Boolean)));
+}
+function normalizeRemoteName(value) {
+  const name=String(value || '').trim();
+  if(!name)throw new Error('名称不能为空');
+  if(name==='.'||name==='..'||/[\/\\\x00-\x1f]/.test(name))throw new Error('名称不能包含路径分隔符或控制字符');
+  if([...name].length>255)throw new Error('名称不能超过 255 个字符');
+  return name;
 }
 function buildCreateSharePayload(fileIds,{expirationDays=7,encrypted=true}={}) {
   const ids=normalizeIds(fileIds);if(!ids.length)throw new Error('请选择需要分享的文件');
@@ -209,6 +293,19 @@ function buildInterruptedDownloadOptions(params) {
   };
 }
 
+function normalizeDownloadRefreshId(value) {
+  const id=String(value || '').trim();
+  return id.length<=512&&!/[\x00-\x1f]/.test(id)&&/^(?:drive:[^:]+|share:[^:]+:.+)$/.test(id) ? id : '';
+}
+function verifiedDownloadState(state,{total=0,received=0,diskSize=0}={}) {
+  const normalized=String(state || '');
+  if(normalized!=='completed')return {state:normalized,error:normalized==='interrupted'?'下载中断':''};
+  const expected=Number(total),networkBytes=Number(received),savedBytes=Number(diskSize);
+  if(expected>0&&(networkBytes!==expected||savedBytes!==expected))return {state:'failed',error:'下载文件大小校验失败，请重试'};
+  if(networkBytes>0&&savedBytes!==networkBytes)return {state:'failed',error:'下载文件落盘不完整，请重试'};
+  return {state:'completed',error:''};
+}
+
 function isValidDeviceId(value) {
   return /^[a-zA-Z0-9_-]{16,128}$/.test(String(value || ''));
 }
@@ -269,6 +366,11 @@ function buildTokenRefreshBody({ refreshToken, clientId = '' } = {}) {
   if (!resolvedClientId) throw new Error('缺少 client_id，无法刷新登录状态');
   return { client_id: resolvedClientId, grant_type: 'refresh_token', refresh_token: token, client_secret: '' };
 }
+function normalizeAccessToken(value) {
+  const token=String(value || '').trim().replace(/^Bearer\s+/i,'').trim();
+  if(token.length<20||token.length>10000||/\s/.test(token))throw new Error('Access Token 格式无效');
+  return token;
+}
 
 function jwtExpiryMs(token) {
   try {
@@ -278,6 +380,50 @@ function jwtExpiryMs(token) {
     const seconds=Number(payload?.exp||0);
     return Number.isFinite(seconds)&&seconds>0?Math.floor(seconds*1000):0;
   } catch { return 0 }
+}
+
+function tokenRefreshDelayMs(expiresAt, now = Date.now(), earlyMs = 5 * 60 * 1000) {
+  const expiry = Number(expiresAt);
+  const current = Number(now);
+  const margin = Math.max(0, Number(earlyMs) || 0);
+  if (!Number.isFinite(expiry) || expiry <= 0 || !Number.isFinite(current)) return null;
+  return Math.max(0, expiry - current - margin);
+}
+
+function isFileNotFound(status, data = {}) {
+  const code = Number(status) || 0;
+  if (code === 404 || code === 410) return true;
+  const detail = String(data?.error_description || data?.error || data?.message || '').toLowerCase();
+  return /not[ _-]?found|does n?ot exist|no such [a-z ]*|不存在|未找到|已不存在/.test(detail);
+}
+
+function apiErrorMessage(status, data = {}) {
+  const code=Number(status)||0;
+  if(code===429)return '请求过于频繁，请稍后重试';
+  if(code>=500)return 'PikPak 服务暂时不可用，请稍后重试';
+  if(isFileNotFound(status,data))return '文件或目录不存在，可能已被删除或移动';
+  const detail=String(data?.error_description||data?.error||data?.message||'').trim();
+  if(detail)return detail.slice(0,300);
+  return code?`请求失败 (${code})`:'网络连接失败，请检查网络后重试';
+}
+
+function compareVersions(a, b) {
+  const parse = value => String(value || '0').trim().replace(/^v/i, '').split('.').map(part => {
+    const match = String(part).match(/^(\d+)/);
+    return match ? parseInt(match[1], 10) : 0;
+  });
+  const pa = parse(a), pb = parse(b);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const x = pa[i] || 0, y = pb[i] || 0;
+    if (x > y) return 1;
+    if (x < y) return -1;
+  }
+  return 0;
+}
+
+function isUpdateAvailable(localVersion, remoteVersion) {
+  return compareVersions(remoteVersion, localVersion) > 0;
 }
 
 function decodeSubtitleBytes(input) {
@@ -297,4 +443,4 @@ function playbackSourcesFromFile(file = {}) {
   const seen=new Set();return values.filter(source=>/^https?:\/\//i.test(source.url)&&!seen.has(source.url)&&seen.add(source.url));
 }
 
-module.exports = { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, matchSubtitles, detectConflicts, generateUniqueName, buildInterruptedDownloadOptions, isValidDeviceId, accountForStorage, extractCredentialsFromStorage, buildTokenRefreshBody, jwtExpiryMs, decodeSubtitleBytes, playbackSourcesFromFile };
+module.exports = { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, buildOfflineTaskAction, offlineTaskState, findMagnetLink, magnetIdentity, parseExternalSearchHtml, normalizeQuota, recentFilesFromEvents, normalizeIds, normalizeRemoteName, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, matchSubtitles, detectConflicts, generateUniqueName, buildInterruptedDownloadOptions, normalizeDownloadRefreshId, verifiedDownloadState, isValidDeviceId, accountForStorage, extractCredentialsFromStorage, buildTokenRefreshBody, normalizeAccessToken, jwtExpiryMs, tokenRefreshDelayMs, apiErrorMessage, isFileNotFound, compareVersions, isUpdateAvailable, decodeSubtitleBytes, playbackSourcesFromFile };

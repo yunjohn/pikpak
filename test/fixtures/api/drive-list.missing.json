@@ -1,0 +1,6 @@
+{
+  "files": [
+    { "id": "fd-min-1", "kind": "drive#file", "parent_id": "" },
+    { "id": "fd-min-2", "kind": "drive#folder", "parent_id": "" }
+  ]
+}

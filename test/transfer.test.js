@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { sanitizeSubDir, buildInterruptedDownloadOptions } = require('../electron/core.cjs');
+const { sanitizeSubDir, buildInterruptedDownloadOptions, normalizeDownloadRefreshId, verifiedDownloadState } = require('../electron/core.cjs');
 
 describe('transfer and search control', () => {
   it('builds valid interrupted download options for HTTP Range resumption', () => {
@@ -44,6 +44,19 @@ describe('transfer and search control', () => {
     expect(buildInterruptedDownloadOptions({ task: { total: 1000 }, localSize: 500 })).toBeNull();
     expect(buildInterruptedDownloadOptions({ task: { path: 'C:\\file.bin', total: 1000 }, localSize: 500 })).toBeNull();
     expect(buildInterruptedDownloadOptions(null)).toBeNull();
+  });
+  it('accepts only bounded download refresh identifiers', () => {
+    expect(normalizeDownloadRefreshId('drive:file-1')).toBe('drive:file-1');
+    expect(normalizeDownloadRefreshId('share:share-1:file-1')).toBe('share:share-1:file-1');
+    expect(normalizeDownloadRefreshId('https://evil.test/file')).toBe('');
+    expect(normalizeDownloadRefreshId('drive:')).toBe('');
+    expect(normalizeDownloadRefreshId(`drive:${'x'.repeat(600)}`)).toBe('');
+  });
+  it('verifies completed downloads against network and disk byte counts',()=>{
+    expect(verifiedDownloadState('completed',{total:100,received:100,diskSize:100})).toEqual({state:'completed',error:''});
+    expect(verifiedDownloadState('completed',{total:100,received:80,diskSize:80})).toMatchObject({state:'failed'});
+    expect(verifiedDownloadState('completed',{total:0,received:80,diskSize:70})).toMatchObject({state:'failed'});
+    expect(verifiedDownloadState('cancelled',{total:100,received:20,diskSize:20})).toEqual({state:'cancelled',error:''});
   });
   it('sanitizes relative subDir paths and blocks directory traversal', () => {
     expect(sanitizeSubDir('')).toBe('');

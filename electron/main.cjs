@@ -1,13 +1,19 @@
-const { app, BrowserWindow, clipboard, dialog, ipcMain, powerSaveBlocker, safeStorage, session, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, net, powerSaveBlocker, safeStorage, session, shell } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
-const { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, buildInterruptedDownloadOptions, isValidDeviceId, accountForStorage, extractCredentialsFromStorage, buildTokenRefreshBody, jwtExpiryMs, decodeSubtitleBytes, playbackSourcesFromFile } = require('./core.cjs');
+const { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, buildOfflineTaskAction, offlineTaskState, findMagnetLink, magnetIdentity, parseExternalSearchHtml, normalizeQuota, recentFilesFromEvents, normalizeIds, normalizeRemoteName, buildCreateSharePayload, normalizeShareList, previewKind, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, buildInterruptedDownloadOptions, normalizeDownloadRefreshId, verifiedDownloadState, isValidDeviceId, accountForStorage, extractCredentialsFromStorage, buildTokenRefreshBody, normalizeAccessToken, jwtExpiryMs, tokenRefreshDelayMs, apiErrorMessage, isFileNotFound, compareVersions, isUpdateAvailable, decodeSubtitleBytes, playbackSourcesFromFile } = require('./core.cjs');
+const { ClipboardMagnetMonitor } = require('./clipboard-monitor.cjs');
 const { logger } = require('./logger.cjs');
 
-process.on('uncaughtException', err => logger.error('process', 'Uncaught exception', err?.stack || err));
-process.on('unhandledRejection', reason => logger.error('process', 'Unhandled rejection', reason?.stack || reason));
+function recordMainCrash(type, stack, reason) {
+  try { logger.recordCrash({ type, reason: reason || '', stack: stack || '', appVersion: app.getVersion() }); } catch {}
+}
+process.on('uncaughtExceptionMonitor', err => { logger.error('process', 'Uncaught exception', err?.stack || err); recordMainCrash('main', err?.stack || '', err?.message || 'uncaughtException'); });
+process.on('unhandledRejection', reason => { logger.error('process', 'Unhandled rejection', reason?.stack || reason); recordMainCrash('main', reason?.stack || String(reason), 'unhandledRejection'); });
+app.on('render-process-gone', (_event, _webContents, details) => { logger.recordCrash({ type: 'renderer', reason: details?.reason, exitCode: details?.exitCode, appVersion: app.getVersion() }); });
+app.on('child-process-gone', (_event, details) => { logger.recordCrash({ type: 'child', reason: details?.reason, exitCode: details?.exitCode, processType: details?.type, appVersion: app.getVersion() }); });
 
 const isDev = !app.isPackaged && process.env.NODE_ENV !== 'production' && !process.env.PIKPAK_PROD;
 
@@ -20,13 +26,38 @@ let loginCompletion = null;
 let authRefreshWindow = null;
 let authRefreshPromise = null;
 const authRefreshWaiters = new Set();
+let authState = { state:'idle', message:'' };
 let shareBridgeWindow = null;
 let mainWindow = null;
+let isQuitting = false;
 const viewerWindows = new Set();
 const viewerPayloads = new Map();
 const playingViewers = new Set();
 let playbackPowerBlocker = null;
 let viewerDownloadsBlocked = false;
+function sendMenuCommand(command){
+  if(!mainWindow||mainWindow.isDestroyed()||mainWindow.webContents.isDestroyed())return;
+  mainWindow.webContents.send('menu:command',command);
+  if(mainWindow.isMinimized())mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+function installApplicationMenu(){
+  const template=[];
+  if(process.platform==='darwin')template.push({label:app.name,submenu:[{role:'about',label:`关于 ${app.name}`},{type:'separator'},{role:'services',label:'服务'},{type:'separator'},{role:'hide',label:`隐藏 ${app.name}`},{role:'hideOthers',label:'隐藏其他'},{role:'unhide',label:'全部显示'},{type:'separator'},{role:'quit',label:`退出 ${app.name}`}]});
+  template.push(
+    {label:'文件',submenu:[{label:'打开分享…',accelerator:'CmdOrCtrl+O',click:()=>sendMenuCommand('open-share')},{type:'separator'},{role:'close',label:'关闭窗口'}]},
+    {label:'编辑',submenu:[{role:'undo',label:'撤销'},{role:'redo',label:'重做'},{type:'separator'},{role:'cut',label:'剪切'},{role:'copy',label:'复制'},{role:'paste',label:'粘贴'},{role:'selectAll',label:'全选'}]},
+    {label:'显示',submenu:[{label:'刷新当前页面',accelerator:'CmdOrCtrl+R',click:()=>sendMenuCommand('refresh')},{label:'传输中心',accelerator:'CmdOrCtrl+Shift+T',click:()=>sendMenuCommand('transfers')},{label:'设置',accelerator:'CmdOrCtrl+,',click:()=>sendMenuCommand('settings')},{type:'separator'},{role:'togglefullscreen',label:'切换全屏'}]},
+    {label:'窗口',submenu:[{role:'minimize',label:'最小化'},{role:'zoom',label:'缩放'},process.platform==='darwin'?{role:'front',label:'前置全部窗口'}:{role:'close',label:'关闭窗口'}]},
+    {role:'help',label:'帮助',submenu:[{label:'项目主页',click:()=>shell.openExternal('https://github.com/yunjohn/pikpak')}]}
+  );
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+function restrictLocalSessionPermissions(targetSession){
+  targetSession.setPermissionCheckHandler(()=>false);
+  targetSession.setPermissionRequestHandler((_webContents,_permission,callback)=>callback(false));
+}
 const downloadItems = new Map();
 const pendingDownloads = [];
 const downloadQueue = [];
@@ -40,7 +71,14 @@ let uploadHistory = [];
 let uploadSaveTimer = null;
 let playbackHistory = {};
 let playbackSaveTimer = null;
-let settings = { downloadDirectory:'', downloadConcurrency:3, uploadConcurrency:3, externalPlayerPath:'' };
+let settings = { downloadDirectory:'', downloadConcurrency:3, uploadConcurrency:3, externalPlayerPath:'', clipboardMagnet:true };
+let clipboardMonitor = null, clipboardTimer = null;
+
+function setAuthState(state, message='') {
+  authState = { state, message:String(message || ''), updatedAt:Date.now() };
+  if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('account:auth-state',authState);
+  return authState;
+}
 
 function updatePlaybackPowerBlocker(){
   if(playingViewers.size&&playbackPowerBlocker===null)playbackPowerBlocker=powerSaveBlocker.start('prevent-display-sleep');
@@ -67,7 +105,7 @@ function clearAccount() {
   if (proactiveRefreshTimer) { clearTimeout(proactiveRefreshTimer); proactiveRefreshTimer = null; }
 }
 function scheduleProactiveRefresh(delayMs) {
-  const delay = Math.max(30000, Number(delayMs) || 0);
+  const delay = Math.max(0, Number(delayMs) || 0);
   if (proactiveRefreshTimer) clearTimeout(proactiveRefreshTimer);
   proactiveRefreshTimer = setTimeout(async() => { proactiveRefreshTimer = null; try{const refreshed=await refreshAccessToken();if(!refreshed)await refreshOfficialAuth()}catch{} }, delay);
   logger.info('auth', 'Proactive token refresh scheduled', { inMinutes: Math.round(delay / 60000) });
@@ -78,12 +116,12 @@ function rememberTokenExpiry(expiresIn) {
   const tokenExpiresAt = Date.now() + seconds * 1000;
   const current = readAccount();
   writeAccount({ ...current, tokenExpiresAt });
-  scheduleProactiveRefresh(Math.max(60000, seconds * 1000 - 5 * 60 * 1000));
+  scheduleProactiveRefresh(tokenRefreshDelayMs(tokenExpiresAt) ?? 0);
 }
 function restoreTokenRefreshSchedule() {
   const expiresAt = Number(readAccount().tokenExpiresAt || 0);
   if (!expiresAt) return;
-  scheduleProactiveRefresh(Math.max(30000, expiresAt - Date.now() - 5 * 60 * 1000));
+  scheduleProactiveRefresh(tokenRefreshDelayMs(expiresAt) ?? 0);
 }
 async function performAccessTokenRefresh() {
   const account = readAccount();
@@ -131,9 +169,11 @@ async function acceptLoginCredentials(found, captureSource='web-login'){
   if(foundAccessToken.length<=20&&foundRefreshToken.length>20)await refreshAccessToken();
   const capturedAccessToken=String(readAccount().accessToken||'');
   if(capturedAccessToken.length<=20)return false;
+  setAuthState('loading-account','授权成功，正在加载账号…');
   for(const waiter of authRefreshWaiters)if(capturedAccessToken!==waiter.previous){authRefreshWaiters.delete(waiter);waiter.resolve(true)}
   if(loginCompletion){const done=loginCompletion;loginCompletion=null;done(accountStatus());setTimeout(()=>{if(loginWindow&&!loginWindow.isDestroyed())loginWindow.close()},300)}
   logger.info('auth','Login completed',{captureSource});
+  setAuthState('success','登录成功');
   return true;
 }
 function parseUploadedTokenRequest(uploadData) {
@@ -165,12 +205,13 @@ function rotateDeviceId(){deviceId=crypto.randomBytes(16).toString('hex');captch
 async function getCaptcha(action) {
   if (captcha.token && captcha.action === action && Date.now() < captcha.expiresAt) return captcha.token;
   const timestamp = String(Date.now());
-  const response = await fetch('https://user.mypikpak.com/v1/shield/captcha/init', {
+  let response;
+  try{response=await fetch('https://user.mypikpak.com/v1/shield/captcha/init', {
     method: 'POST', headers: { 'content-type':'application/json', 'x-client-id':CLIENT_ID, 'x-device-id':deviceId },
     body: JSON.stringify({ client_id:CLIENT_ID, action, device_id:deviceId, meta:{ captcha_sign:signCaptcha(deviceId,timestamp), client_version:CLIENT_VERSION, package_name:PACKAGE_NAME, user_id:'', timestamp } })
-  });
+  })}catch(error){logger.warn('network','Captcha service is unreachable',{code:error?.cause?.code||error?.code||''});throw new Error(apiErrorMessage(0))}
   const data = await response.json();
-  if (!response.ok || !data.captcha_token) throw new Error(data.error_description || data.error || '获取访问令牌失败');
+  if (!response.ok || !data.captcha_token) throw new Error(apiErrorMessage(response.status,data)||'获取访问令牌失败');
   captcha = { token:data.captcha_token, action, expiresAt:Date.now() + (Number(data.expires_in || 300)-10)*1000 };
   return captcha.token;
 }
@@ -179,7 +220,8 @@ async function apiRequest(url, { action, method='GET', body, authorization='', r
   const headers = { 'x-client-id':CLIENT_ID, 'x-device-id':deviceId, 'x-captcha-token':token };
   if (body) headers['content-type'] = 'application/json';
   if (authorization) headers.authorization = authorization.startsWith('Bearer ') ? authorization : `Bearer ${authorization}`;
-  const response = await fetch(url, { method, headers, body:body ? JSON.stringify(body) : undefined });
+  let response;
+  try{response=await fetch(url, { method, headers, body:body ? JSON.stringify(body) : undefined })}catch(error){logger.warn('network','PikPak API is unreachable',{path:new URL(url).pathname,code:error?.cause?.code||error?.code||''});throw new Error(apiErrorMessage(0))}
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     logger.warn('api', `API request failed (${response.status})`, { path: new URL(url).pathname, status: response.status, error: data.error_description || data.error });
@@ -193,7 +235,7 @@ async function apiRequest(url, { action, method='GET', body, authorization='', r
       logger.warn('auth', 'Auth refresh failed, session expired');
       throw new Error('登录状态已过期，请重新登录 PikPak');
     }
-    const error=new Error(data.error_description || data.error || `请求失败 (${response.status})`);error.status=response.status;error.data=data;throw error;
+    const error=new Error(apiErrorMessage(response.status,data));error.status=response.status;error.data=data;error.fileNotFound=isFileNotFound(response.status,data);throw error;
   }
   return data;
 }
@@ -208,9 +250,11 @@ async function listPages(makeUrl, options) {
 }
 async function driveMutation(pathname,{method='POST',body}={}){
   const account=readAccount();if(!account.accessToken)throw new Error('请先连接 PikPak 账户');
-  return apiRequest(`https://api-drive.mypikpak.com${pathname}`,{action:`${method}:${pathname}`,method,body,authorization:account.accessToken});
+  const result=await apiRequest(`https://api-drive.mypikpak.com${pathname}`,{action:`${method}:${pathname}`,method,body,authorization:account.accessToken});
+  clearSearchCache();
+  return result;
 }
-function accountStatus() { const value=readAccount(); return { connected:!!value.accessToken, source:value.source || '', updatedAt:value.updatedAt || 0 }; }
+function accountStatus() { const value=readAccount(); return { connected:!!value.accessToken, source:value.source || '', updatedAt:value.updatedAt || 0, authState }; }
 function installPikPakSessionCapture() {
   const pikpakSession=session.fromPartition('persist:pikpak-login');
   pikpakSession.webRequest.onBeforeSendHeaders({urls:['https://*.mypikpak.com/*']},(details,callback)=>{
@@ -220,17 +264,19 @@ function installPikPakSessionCapture() {
     if(capturedDevice)deviceId=capturedDevice;
     if(capturedCaptcha)captcha={token:capturedCaptcha,action:'',expiresAt:Date.now()+240000};
     if(auth.length>20){
+      setAuthState('loading-account','已确认登录，正在加载账号…');
       const accessToken=auth.replace(/^Bearer\s+/i,'');
       const tokenExpiresAt=jwtExpiryMs(accessToken);
       writeAccount({accessToken,tokenExpiresAt,source:'web-login',updatedAt:Date.now()});
-      if(tokenExpiresAt>Date.now())scheduleProactiveRefresh(Math.max(30000,tokenExpiresAt-Date.now()-5*60*1000));
+      if(tokenExpiresAt)scheduleProactiveRefresh(tokenRefreshDelayMs(tokenExpiresAt) ?? 0);
       for(const waiter of authRefreshWaiters)if(accessToken!==waiter.previous){authRefreshWaiters.delete(waiter);waiter.resolve(true)}
-      if(loginCompletion){const done=loginCompletion,capturedWindow=loginWindow;loginCompletion=null;done(accountStatus());setTimeout(async()=>{if(capturedWindow&&!capturedWindow.isDestroyed())await captureStoredCredentials(capturedWindow.webContents);if(capturedWindow&&!capturedWindow.isDestroyed())capturedWindow.close()},1000)}
+      if(loginCompletion){const done=loginCompletion,capturedWindow=loginWindow;loginCompletion=null;setAuthState('success','登录成功');done(accountStatus());setTimeout(async()=>{if(capturedWindow&&!capturedWindow.isDestroyed())await captureStoredCredentials(capturedWindow.webContents);if(capturedWindow&&!capturedWindow.isDestroyed())capturedWindow.close()},1000)}
     }
     callback({requestHeaders:headers});
   });
   pikpakSession.webRequest.onBeforeRequest({urls:['https://user.mypikpak.com/v1/auth/token']},(details,callback)=>{
     try{
+      setAuthState('exchanging-token','正在交换访问令牌…');
       const parsed=parseUploadedTokenRequest(details?.uploadData);
       if(parsed){
         const current=readAccount();
@@ -255,9 +301,10 @@ function refreshOfficialAuth(){
 }
 function openLoginWindow(){
   if(loginWindow&&!loginWindow.isDestroyed()){loginWindow.focus();return}
+  setAuthState('waiting-scan','请在官方窗口扫码并确认登录');
   loginWindow=new BrowserWindow({width:1080,height:760,minWidth:760,minHeight:560,title:'登录 PikPak',autoHideMenuBar:true,webPreferences:{session:session.fromPartition('persist:pikpak-login'),contextIsolation:true,nodeIntegration:false}});
   loginWindow.loadURL('https://mypikpak.com/drive/all');
-  loginWindow.on('closed',()=>{loginWindow=null;if(loginCompletion){const done=loginCompletion;loginCompletion=null;done(accountStatus())}});
+  loginWindow.on('closed',()=>{loginWindow=null;if(loginCompletion){const done=loginCompletion;loginCompletion=null;if(!readAccount().accessToken)setAuthState('retryable-error','登录未完成，可重新打开登录窗口');done(accountStatus())}});
 }
 
 function safeFilename(value) {
@@ -265,7 +312,25 @@ function safeFilename(value) {
   return name || 'download';
 }
 function settingsPath(){return path.join(app.getPath('userData'),'settings.json')}
-function normalizeSettings(value={}){const directory=String(value.downloadDirectory||''),externalPlayerPath=String(value.externalPlayerPath||'');return {downloadDirectory:directory&&fs.existsSync(directory)?directory:'',downloadConcurrency:Math.max(1,Math.min(8,Math.round(Number(value.downloadConcurrency)||3))),uploadConcurrency:Math.max(1,Math.min(8,Math.round(Number(value.uploadConcurrency)||3))),externalPlayerPath:externalPlayerPath&&/\.exe$/i.test(externalPlayerPath)&&fs.existsSync(externalPlayerPath)?externalPlayerPath:''}}
+function clipboardSeenPath(){return path.join(app.getPath('userData'),'clipboard-magnets.json')}
+function loadClipboardSeen(){try{const values=JSON.parse(fs.readFileSync(clipboardSeenPath(),'utf8'));return Array.isArray(values)?values.filter(value=>typeof value==='string').slice(-500):[]}catch{return []}}
+function saveClipboardSeen(values){try{fs.writeFileSync(clipboardSeenPath(),JSON.stringify(values.slice(-500)))}catch(error){logger.warn('offline','Unable to save clipboard magnet history',{message:String(error?.message||error)})}}
+function resolveExternalPlayerExecutable(filePath){
+  try{
+    const stat=fs.statSync(filePath);
+    if(process.platform==='darwin'&&stat.isDirectory()&&/\.app$/i.test(filePath)){
+      const executablesDir=path.join(filePath,'Contents','MacOS');
+      const bundleName=path.basename(filePath,'.app'),names=fs.readdirSync(executablesDir);
+      for(const name of [bundleName,...names.filter(value=>value!==bundleName)]){const candidate=path.join(executablesDir,name);try{if(fs.statSync(candidate).isFile()){fs.accessSync(candidate,fs.constants.X_OK);return candidate}}catch{}}
+      return '';
+    }
+    if(!stat.isFile())return '';
+    if(process.platform==='win32')return /\.exe$/i.test(filePath)?filePath:'';
+    fs.accessSync(filePath,fs.constants.X_OK);return filePath;
+  }catch{return ''}
+}
+function isExecutableFile(filePath){return Boolean(resolveExternalPlayerExecutable(filePath))}
+function normalizeSettings(value={}){const directory=String(value.downloadDirectory||''),externalPlayerPath=String(value.externalPlayerPath||''),theme=['system','light','dark'].includes(value.theme)?value.theme:'system';return {downloadDirectory:directory&&fs.existsSync(directory)?directory:'',downloadConcurrency:Math.max(1,Math.min(8,Math.round(Number(value.downloadConcurrency)||3))),uploadConcurrency:Math.max(1,Math.min(8,Math.round(Number(value.uploadConcurrency)||3))),externalPlayerPath:isExecutableFile(externalPlayerPath)?externalPlayerPath:'',theme,clipboardMagnet:value.clipboardMagnet!==false}}
 function loadSettings(){try{settings=normalizeSettings(JSON.parse(fs.readFileSync(settingsPath(),'utf8')))}catch{settings=normalizeSettings()}}
 function saveSettings(){const target=settingsPath();fs.mkdirSync(path.dirname(target),{recursive:true});fs.writeFileSync(target,JSON.stringify(settings,null,2))}
 function uniqueDownloadPath(name, subDir = '') {
@@ -339,7 +404,7 @@ function installDownloadManager() {
     });
     emitDownload(snapshot('progress'));
     item.on('updated',(_e,state)=>emitDownload(snapshot(state==='interrupted'?'interrupted':'progress')));
-    item.once('done',(_e,state)=>{downloadItems.delete(request.id);activeDownloads=Math.max(0,activeDownloads-1);emitDownload(snapshot(state,state==='interrupted'?'下载中断':''));scheduleDownloads()});
+    item.once('done',async(_e,state)=>{downloadItems.delete(request.id);activeDownloads=Math.max(0,activeDownloads-1);const value=snapshot(state);let diskSize=0;try{diskSize=(await fs.promises.stat(savePath)).size}catch{}const verified=verifiedDownloadState(state,{total:value.total,received:value.received,diskSize});if(verified.state==='failed')logger.warn('download','Downloaded file failed size verification',{id:request.id,name:value.name,total:value.total,received:value.received,diskSize});emitDownload({...value,...verified});scheduleDownloads()});
   });
 }
 
@@ -499,9 +564,9 @@ ipcMain.handle('account:about', async () => {
   const data=await apiRequest('https://api-drive.mypikpak.com/drive/v1/about',{action:'GET:/drive/v1/about',authorization:account.accessToken});
   return {quota:normalizeQuota(data),user:data.user || null,kind:data.kind || ''};
 });
-ipcMain.handle('account:set-token', (_, token) => { clearAccount(); writeAccount({ accessToken:token, source:'manual-token' }); return { connected:!!token }; });
+ipcMain.handle('account:set-token', (_, value) => { const token=normalizeAccessToken(value);clearAccount();clearSearchCache();writeAccount({accessToken:token,tokenExpiresAt:jwtExpiryMs(token),source:'manual-token'});restoreTokenRefreshSchedule();return accountStatus() });
 ipcMain.handle('account:login',()=>new Promise(resolve=>{loginCompletion=resolve;openLoginWindow()}));
-ipcMain.handle('account:logout',async()=>{clearAccount();rotateDeviceId();await session.fromPartition('persist:pikpak-login').clearStorageData();return accountStatus()});
+ipcMain.handle('account:logout',async()=>{clearAccount();clearSearchCache();rotateDeviceId();setAuthState('idle','');await session.fromPartition('persist:pikpak-login').clearStorageData();return accountStatus()});
 ipcMain.handle('share:open', async (_, rawUrl) => openShareDirectory(rawUrl));
 ipcMain.handle('share:file-info', async (_, { shareId, fileId }) => {
   const query = new URLSearchParams({ share_id:shareId, file_id:fileId, thumbnail_size:'SIZE_LARGE' });
@@ -556,23 +621,62 @@ ipcMain.handle('shares:copy',(_,item)=>{const url=String(item?.shareUrl||'');if(
 ipcMain.handle('offline:create', async (_, value) => {const payload=value&&typeof value==='object'?value:{url:value};return driveMutation('/drive/v1/files',{body:buildOfflineTaskPayload(payload.url,payload.parentId)});});
 ipcMain.handle('offline:list', async () => {
   const account=readAccount();if(!account.accessToken)throw new Error('请先连接 PikPak 账户');
-  const query=new URLSearchParams({type:'offline',limit:'100',thumbnail_size:'SIZE_SMALL',with_reference_resource:'true'});
-  const data=await apiRequest(`https://api-drive.mypikpak.com/drive/v1/tasks?${query}`,{action:'GET:/drive/v1/tasks',authorization:account.accessToken});
-  return {tasks:data.tasks || data.data?.tasks || []};
+  const tasks=[];let pageToken='';
+  for(let page=0;page<100;page++){
+    const query=new URLSearchParams({type:'offline',limit:'100',thumbnail_size:'SIZE_SMALL',with_reference_resource:'true'});if(pageToken)query.set('page_token',pageToken);
+    const data=await apiRequest(`https://api-drive.mypikpak.com/drive/v1/tasks?${query}`,{action:'GET:/drive/v1/tasks',authorization:account.accessToken});
+    tasks.push(...(data.tasks || data.data?.tasks || []));pageToken=nextPageToken(data);if(!pageToken)break;
+  }
+  const seen=new Set();return {tasks:(tasks.filter(task=>{const id=String(task?.id||task?.task_id||'');if(!id||seen.has(id))return false;seen.add(id);return true})).map(task=>({...task,_state:offlineTaskState(task)}))};
 });
 ipcMain.handle('offline:delete', async (_, id) => {
   const account=readAccount();if(!account.accessToken)throw new Error('请先连接 PikPak 账户');
   const query=new URLSearchParams({task_ids:String(id),delete_files:'false'});
   return apiRequest(`https://api-drive.mypikpak.com/drive/v1/tasks?${query}`,{action:'DELETE:/drive/v1/tasks',method:'DELETE',authorization:account.accessToken});
 });
+async function clipboardMagnetTick() {
+  try { await clipboardMonitor?.tick(); } catch {}
+}
+function startClipboardMagnetMonitor() {
+  if (clipboardTimer) return;
+  clipboardMonitor = new ClipboardMagnetMonitor({
+    readText:()=>clipboard.readText(), findMagnet:findMagnetLink, identity:magnetIdentity,
+    isEnabled:()=>settings.clipboardMagnet, isAuthenticated:()=>Boolean(readAccount().accessToken),
+    submit:async magnet=>{const result=await driveMutation('/drive/v1/files',{body:buildOfflineTaskPayload(magnet,'')});const task=result?.task||result?.file||null;logger.info('offline','Clipboard magnet link submitted as offline task',{taskId:String(task?.id||'')});return task},
+    notify:value=>{if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('offline:clipboard',value)},
+    warn:error=>logger.warn('offline','Clipboard offline task creation failed',{message:String(error?.message||error)}),
+    detected:()=>logger.info('offline','Clipboard magnet link detected'),
+    initialSeen:loadClipboardSeen(), remember:saveClipboardSeen
+  });
+  clipboardMonitor.prime();
+  clipboardTimer = setInterval(clipboardMagnetTick, 2500);
+}
+
 ipcMain.handle('drive:list', async (_, parentId='') => {
   const account = readAccount(); if (!account.accessToken) throw new Error('请先连接 PikPak 账户');
-  return listPages(pageToken=>{const query=new URLSearchParams({parent_id:parentId,limit:'100',thumbnail_size:'SIZE_LARGE',with_audit:'true'});if(pageToken)query.set('page_token',pageToken);return `https://api-drive.mypikpak.com/drive/v1/files?${query}`},{action:'GET:/drive/v1/files',authorization:account.accessToken});
+  try {
+    return await listPages(pageToken=>{const query=new URLSearchParams({parent_id:parentId,limit:'100',thumbnail_size:'SIZE_LARGE',with_audit:'true'});if(pageToken)query.set('page_token',pageToken);return `https://api-drive.mypikpak.com/drive/v1/files?${query}`},{action:'GET:/drive/v1/files',authorization:account.accessToken});
+  } catch (err) {
+    if (err && (err.fileNotFound || isFileNotFound(err.status, err.data))) {
+      logger.warn('drive', 'Requested parent id is not found', { parent_id: String(parentId || '') });
+      return { files: [], notFound: true, parentId: String(parentId || '') };
+    }
+    throw err;
+  }
 });
 let activeSearchController = null;
+const searchCache=new Map(),SEARCH_CACHE_TTL=2*60*1000,SEARCH_CACHE_LIMIT=10;
+function clearSearchCache(){searchCache.clear()}
 ipcMain.handle('drive:search',async(_,rawQuery)=>{
   const query=String(rawQuery||'').trim().toLocaleLowerCase();if(query.length<2)throw new Error('全盘搜索至少输入 2 个字符');const account=readAccount();if(!account.accessToken)throw new Error('请先连接 PikPak 账户');
   if(activeSearchController){activeSearchController.abort();activeSearchController=null}
+  const cached=searchCache.get(query);
+  if(cached&&Date.now()-cached.createdAt<SEARCH_CACHE_TTL){
+    searchCache.delete(query);searchCache.set(query,cached);
+    if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('search:progress',{scanned:cached.result.scanned,folders:cached.result.folders,matchesCount:cached.result.files.length,isDone:true,cached:true});
+    return {...cached.result,cached:true};
+  }
+  if(cached)searchCache.delete(query);
   const controller=new AbortController();activeSearchController=controller;
   const pending=[{id:'',names:[]}],visited=new Set(),matches=[];let scanned=0,truncated=false;
   try{
@@ -581,12 +685,20 @@ ipcMain.handle('drive:search',async(_,rawQuery)=>{
       const batch=[];while(pending.length&&batch.length<4){const folder=pending.shift();if(!visited.has(folder.id)){visited.add(folder.id);batch.push(folder)}}
       const results=await Promise.all(batch.map(async folder=>{
         if(controller.signal.aborted)throw new DOMException('Search aborted','AbortError');
-        const value=await listPages(pageToken=>{const params=new URLSearchParams({parent_id:folder.id,limit:'100',thumbnail_size:'SIZE_MEDIUM'});if(pageToken)params.set('page_token',pageToken);return `https://api-drive.mypikpak.com/drive/v1/files?${params}`},{action:'GET:/drive/v1/files',authorization:account.accessToken});return {folder,files:value.files};
+        try{
+          const value=await listPages(pageToken=>{const params=new URLSearchParams({parent_id:folder.id,limit:'100',thumbnail_size:'SIZE_MEDIUM'});if(pageToken)params.set('page_token',pageToken);return `https://api-drive.mypikpak.com/drive/v1/files?${params}`},{action:'GET:/drive/v1/files',authorization:account.accessToken});return {folder,files:value.files};
+        }catch(err){
+          if(err&&(err.fileNotFound||isFileNotFound(err.status,err.data))){logger.debug('search','Skipped a folder that is no longer available',{folder_id:String(folder.id||'')});return {folder,files:[]}}
+          throw err;
+        }
       }));
       for(const result of results){for(const item of result.files){scanned++;const names=[...result.folder.names,item.name||''];if(String(item.name||'').toLocaleLowerCase().includes(query))matches.push({...item,_search_path:names.join(' / '),_search_parent_id:result.folder.id});if(item.kind==='drive#folder'&&!visited.has(item.id))pending.push({id:item.id,names});if(scanned>=50000||matches.length>=500)break}}
       if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('search:progress',{scanned,folders:visited.size,matchesCount:matches.length,isDone:false});
     }
-    if(pending.length||visited.size>=5000||scanned>=50000||matches.length>=500)truncated=true;return {files:matches,scanned,folders:visited.size,truncated};
+    if(pending.length||visited.size>=5000||scanned>=50000||matches.length>=500)truncated=true;
+    const result={files:matches,scanned,folders:visited.size,truncated};
+    if(!truncated){searchCache.set(query,{createdAt:Date.now(),result});while(searchCache.size>SEARCH_CACHE_LIMIT)searchCache.delete(searchCache.keys().next().value)}
+    return result;
   }catch(err){
     if(err.name==='AbortError')return {files:matches,scanned,folders:visited.size,truncated:true,cancelled:true};
     throw err;
@@ -615,12 +727,14 @@ ipcMain.handle('recent:list', async () => {
   return {files:recentFilesFromEvents(events)};
 });
 ipcMain.handle('drive:star',(_,payload)=>driveMutation(`/drive/v1/files:${payload.starred?'star':'unstar'}`,{body:{ids:normalizeIds(payload.ids||payload.id)}}));
-ipcMain.handle('drive:create-folder',(_,payload)=>driveMutation('/drive/v1/files',{body:{kind:'drive#folder',parent_id:payload.parentId || '',name:String(payload.name||'').trim()}}));
-ipcMain.handle('drive:rename',(_,payload)=>driveMutation(`/drive/v1/files/${encodeURIComponent(payload.id)}`,{method:'PATCH',body:{name:String(payload.name||'').trim()}}));
+ipcMain.handle('drive:create-folder',(_,payload={})=>driveMutation('/drive/v1/files',{body:{kind:'drive#folder',parent_id:String(payload.parentId || ''),name:normalizeRemoteName(payload.name)}}));
+ipcMain.handle('drive:rename',(_,payload={})=>{const id=String(payload.id||'').trim();if(!id)throw new Error('文件 ID 无效');return driveMutation(`/drive/v1/files/${encodeURIComponent(id)}`,{method:'PATCH',body:{name:normalizeRemoteName(payload.name)}})});
 ipcMain.handle('drive:trash',(_,ids)=>driveMutation('/drive/v1/files:batchTrash',{body:{ids:normalizeIds(ids)}}));
 ipcMain.handle('drive:transfer',(_,payload)=>{
+  if(!['move','copy'].includes(payload?.operation))throw new Error('不支持的文件操作');
+  const ids=normalizeIds(payload.ids);if(!ids.length)throw new Error('请选择要操作的文件');
   const endpoint=payload.operation==='move'?'batchMove':'batchCopy';
-  return driveMutation(`/drive/v1/files:${endpoint}`,{body:{ids:payload.ids,to:{parent_id:payload.parentId || ''}}});
+  return driveMutation(`/drive/v1/files:${endpoint}`,{body:{ids,to:{parent_id:String(payload.parentId || '')}}});
 });
 ipcMain.handle('trash:list',async()=>{
   const account=readAccount();if(!account.accessToken)throw new Error('请先连接 PikPak 账户');
@@ -628,19 +742,25 @@ ipcMain.handle('trash:list',async()=>{
 });
 ipcMain.handle('trash:restore',(_,ids)=>driveMutation('/drive/v1/files:batchUntrash',{body:{ids:normalizeIds(ids)}}));
 ipcMain.handle('trash:delete',(_,ids)=>driveMutation('/drive/v1/files:batchDelete',{body:{ids:normalizeIds(ids)}}));
-ipcMain.handle('download:start',(_,{url,name,subDir=''})=>{
+ipcMain.handle('download:start',(_,{url,name,subDir='',refreshId=''})=>{
   if(!/^https?:\/\//i.test(String(url||'')))throw new Error('无效的下载地址');
   if(!mainWindow||mainWindow.isDestroyed())throw new Error('主窗口不可用');
-  const task={id:crypto.randomUUID(),name:safeFilename(name),subDir:sanitizeSubDir(subDir),url:String(url),state:'queued',received:0,total:0,percent:0};
+  const safeRefreshId=normalizeDownloadRefreshId(refreshId);
+  const task={id:crypto.randomUUID(),name:safeFilename(name),subDir:sanitizeSubDir(subDir),url:String(url),refreshId:safeRefreshId,state:'queued',received:0,total:0,percent:0};
   logger.info('download','Download task queued',{id:task.id,name:task.name,subDir:task.subDir});
   downloadQueue.push({task,url});emitDownload(task);scheduleDownloads();return task;
 });
 ipcMain.handle('settings:get',()=>({...settings,effectiveDownloadDirectory:settings.downloadDirectory||app.getPath('downloads')}));
 ipcMain.handle('settings:choose-download-dir',async()=>{const picked=await dialog.showOpenDialog(mainWindow||undefined,{title:'选择默认下载目录',properties:['openDirectory','createDirectory']});return picked.canceled?'':picked.filePaths[0]||''});
-ipcMain.handle('settings:choose-external-player',async()=>{const picked=await dialog.showOpenDialog(mainWindow||undefined,{title:'选择外部播放器',properties:['openFile'],filters:[{name:'Windows 应用程序',extensions:['exe']}]});return picked.canceled?'':picked.filePaths[0]||''});
-ipcMain.handle('settings:set',(_,value)=>{settings=normalizeSettings(value);saveSettings();scheduleDownloads();scheduleUploads();return {...settings,effectiveDownloadDirectory:settings.downloadDirectory||app.getPath('downloads')}});
+ipcMain.handle('settings:choose-external-player',async()=>{const options={title:'选择外部播放器',properties:['openFile']};if(process.platform==='win32')options.filters=[{name:'Windows 应用程序',extensions:['exe']}];const picked=await dialog.showOpenDialog(mainWindow||undefined,options);const selected=picked.filePaths[0]||'';if(picked.canceled||!selected)return '';if(!isExecutableFile(selected))throw new Error('请选择有效的播放器可执行文件');return selected});
+ipcMain.handle('settings:set',(_,value)=>{const wasEnabled=settings.clipboardMagnet;settings=normalizeSettings(value);if(!wasEnabled&&settings.clipboardMagnet)clipboardMonitor?.prime();saveSettings();scheduleDownloads();scheduleUploads();return {...settings,effectiveDownloadDirectory:settings.downloadDirectory||app.getPath('downloads')}});
 ipcMain.handle('settings:reset',()=>{settings=normalizeSettings({});saveSettings();logger.info('settings','Settings reset to default');scheduleDownloads();scheduleUploads();return {...settings,effectiveDownloadDirectory:settings.downloadDirectory||app.getPath('downloads')}});
 ipcMain.handle('app:export-diagnostics',async()=>{logger.info('app','Exporting diagnostics report');return logger.buildDiagnostics({appVersion:app.getVersion(),account:accountStatus(),settings:{...settings,effectiveDownloadDirectory:settings.downloadDirectory||app.getPath('downloads')},transferStats:{activeDownloads,queuedDownloads:downloadQueue.length,totalDownloadsRecorded:downloadHistory.length,activeUploads,queuedUploads:uploadQueue.length,totalUploadsRecorded:uploadHistory.length}})});
+ipcMain.handle('app:info',async()=>{
+  let buildTime='';
+  try{buildTime=(await fs.promises.stat(process.execPath)).mtime.toISOString()}catch{}
+  return {version:app.getVersion(),buildTime,logsDirectory:path.join(app.getPath('userData'),'logs'),packaged:app.isPackaged,platform:process.platform};
+});
 ipcMain.handle('upload:choose',async(_,{parentId='' }={})=>{
   if(!readAccount().accessToken)throw new Error('请先连接 PikPak 账户');
   const picked=await dialog.showOpenDialog(mainWindow||undefined,{title:'选择要上传到 PikPak 的文件',properties:['openFile','multiSelections']});if(picked.canceled)return [];
@@ -656,12 +776,12 @@ ipcMain.handle('viewer:open',async(_,{url,name,fileId='',mimeType,sources=[],ite
   const target=String(url||'');if(!/^https?:\/\//i.test(target))throw new Error('当前文件没有可用的查看地址');
   const kind=previewKind(name,mimeType);
   if(!kind)throw new Error('此文件类型暂不支持预览，请使用“下载到本机”');
-  const viewerSession=session.fromPartition('pikpak-viewer');if(!viewerDownloadsBlocked){viewerDownloadsBlocked=true;viewerSession.on('will-download',event=>event.preventDefault())}
+  const viewerSession=session.fromPartition('pikpak-viewer');restrictLocalSessionPermissions(viewerSession);if(!viewerDownloadsBlocked){viewerDownloadsBlocked=true;viewerSession.on('will-download',event=>event.preventDefault())}
   fileId=String(fileId||'');
   const win=new BrowserWindow({width:1100,height:760,minWidth:720,minHeight:480,title:String(name||'文件查看'),autoHideMenuBar:true,backgroundColor:'#111827',parent:mainWindow||undefined,webPreferences:{session:viewerSession,preload:path.join(__dirname,'viewer-preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true}});
   viewerWindows.add(win);win.webContents.setWindowOpenHandler(()=>({action:'deny'}));
   const safeSources=(Array.isArray(sources)?sources:[]).slice(0,10).map(source=>({url:String(source?.url||''),label:String(source?.label||'清晰度').slice(0,30)})).filter(source=>/^https?:\/\//i.test(source.url));
-  const safeItems=(Array.isArray(items)?items:[]).slice(0,60).map(item=>({id:String(item?.id||''),name:String(item?.name||'图片').slice(0,300),url:String(item?.url||'')})).filter(item=>/^https?:\/\//i.test(item.url));
+  const safeItems=(Array.isArray(items)?items:[]).slice(0,5000).map(item=>({id:String(item?.id||''),name:String(item?.name||'图片').slice(0,300),url:String(item?.url||'')})).filter(item=>/^https?:\/\//i.test(item.url));
   const safeSubtitles=(Array.isArray(subtitles)?subtitles:[]).slice(0,15).map(sub=>({id:String(sub?.id||''),name:String(sub?.name||'字幕').slice(0,120),url:String(sub?.url||'')})).filter(sub=>/^https?:\/\//i.test(sub.url));
   const safePlaylist=(Array.isArray(playlist)?playlist:[]).slice(0,101).map(entry=>({fileId:String(entry?.fileId||''),name:String(entry?.name||'视频').slice(0,300),url:/^https?:\/\//i.test(String(entry?.url||''))?String(entry.url):'',sources:(Array.isArray(entry?.sources)?entry.sources:[]).slice(0,10).map(source=>({url:String(source?.url||''),label:String(source?.label||'清晰度').slice(0,30)})).filter(source=>/^https?:\/\//i.test(source.url))})).filter(entry=>entry.fileId&&(entry.fileId.startsWith('drive:')||entry.fileId.startsWith('share:')));
   const token=crypto.randomUUID(),viewerWebContentsId=win.webContents.id;viewerPayloads.set(token,{webContentsId:viewerWebContentsId,payload:{url:target,name:String(name||'文件查看'),kind,fileId,sources:safeSources,items:safeItems,subtitles:safeSubtitles,playlist:safePlaylist}});win.on('closed',()=>{playingViewers.delete(viewerWebContentsId);updatePlaybackPowerBlocker();viewerWindows.delete(win);viewerPayloads.delete(token)});
@@ -689,12 +809,17 @@ ipcMain.handle('viewer:subtitle-choose',async event=>{const win=viewerFor(event)
 ipcMain.handle('viewer:subtitle-decode',(event,input)=>{viewerFor(event);const bytes=Buffer.from(input||[]);if(bytes.length>10*1024*1024)throw new Error('字幕文件不能超过 10 MB');return decodeSubtitleBytes(bytes)});
 ipcMain.handle('viewer:media-resolve',async(event,requestedFileId)=>{const entry=viewerEntryFor(event),progressId=String(requestedFileId||''),playlistEntry=(entry.payload.playlist||[]).find(item=>item.fileId===progressId);if(!playlistEntry)throw new Error('该视频不在当前播放列表中');if(playlistEntry.sources?.length)return {url:playlistEntry.url||playlistEntry.sources[0].url,sources:playlistEntry.sources};const result=await resolveViewerMedia(progressId);playlistEntry.url=result.url;playlistEntry.sources=result.sources;return result});
 ipcMain.handle('viewer:media-refresh',async(event,requestedFileId='')=>{const entry=viewerEntryFor(event),progressId=String(requestedFileId||entry.payload.fileId||'');if(progressId!==entry.payload.fileId&&!(entry.payload.playlist||[]).some(item=>item.fileId===progressId))throw new Error('该视频不在当前播放列表中');const result=await resolveViewerMedia(progressId),playlistEntry=(entry.payload.playlist||[]).find(item=>item.fileId===progressId);if(playlistEntry){playlistEntry.url=result.url;playlistEntry.sources=result.sources}if(progressId===entry.payload.fileId){entry.payload.url=result.url;entry.payload.sources=result.sources}return result});
-ipcMain.handle('viewer:open-external',async(event,requestedFileId='')=>{const entry=viewerEntryFor(event),progressId=String(requestedFileId||entry.payload.fileId||'');if(!settings.externalPlayerPath)throw new Error('请先在主界面“设置”中选择外部播放器');if(!/\.exe$/i.test(settings.externalPlayerPath)||!fs.existsSync(settings.externalPlayerPath))throw new Error('外部播放器路径已失效，请重新选择');let media=progressId===entry.payload.fileId?entry.payload:(entry.payload.playlist||[]).find(item=>item.fileId===progressId);if(!media)throw new Error('该视频不在当前播放列表中');if(!/^https?:\/\//i.test(String(media.url||''))){const resolved=await resolveViewerMedia(progressId);media.url=resolved.url;media.sources=resolved.sources}const child=spawn(settings.externalPlayerPath,[String(media.url)],{detached:true,stdio:'ignore',windowsHide:false});await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',reject)});child.unref();logger.info('viewer','Opened media in configured external player',{player:path.basename(settings.externalPlayerPath),fileId:progressId});return true});
+ipcMain.handle('viewer:open-external',async(event,requestedFileId='')=>{const entry=viewerEntryFor(event),progressId=String(requestedFileId||entry.payload.fileId||'');if(!settings.externalPlayerPath)throw new Error('请先在主界面“设置”中选择外部播放器');const playerExecutable=resolveExternalPlayerExecutable(settings.externalPlayerPath);if(!playerExecutable)throw new Error('外部播放器路径已失效，请重新选择');let media=progressId===entry.payload.fileId?entry.payload:(entry.payload.playlist||[]).find(item=>item.fileId===progressId);if(!media)throw new Error('该视频不在当前播放列表中');if(!/^https?:\/\//i.test(String(media.url||''))){const resolved=await resolveViewerMedia(progressId);media.url=resolved.url;media.sources=resolved.sources}const child=spawn(playerExecutable,[String(media.url)],{detached:true,stdio:'ignore',windowsHide:false});await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',reject)});child.unref();logger.info('viewer','Opened media in configured external player',{player:path.basename(settings.externalPlayerPath),fileId:progressId});return true});
 ipcMain.handle('viewer:capture',async(event,payload={})=>{const win=viewerFor(event),rect=payload.rect||{},width=Math.max(1,Math.floor(Number(rect.width)||1)),height=Math.max(1,Math.floor(Number(rect.height)||1)),x=Math.max(0,Math.floor(Number(rect.x)||0)),y=Math.max(0,Math.floor(Number(rect.y)||0));if(width>10000||height>10000)throw new Error('截图区域无效');const image=await win.webContents.capturePage({x,y,width,height}),base=String(payload.name||'视频').replace(/[<>:"/\\|?*\x00-\x1f]/g,'_').slice(0,120),stamp=new Date().toISOString().replace(/[:.]/g,'-'),saved=await dialog.showSaveDialog(win,{title:'保存视频截图',defaultPath:`${base}-${stamp}.png`,filters:[{name:'PNG 图片',extensions:['png']}]});if(saved.canceled||!saved.filePath)return '';await fs.promises.writeFile(saved.filePath,image.toPNG());return saved.filePath});
 ipcMain.handle('viewer:progress-get',(_,fileId)=>{const id=String(fileId||'');return id&&playbackHistory[id]?playbackHistory[id]:{time:0,duration:0}});
 ipcMain.handle('viewer:progress-set',(_,payload)=>{const id=String(payload?.fileId||''),time=Number(payload?.time||0),duration=Number(payload?.duration||0);if(!id||!Number.isFinite(time)||time<0||!Number.isFinite(duration)||duration<0)return false;if(time===0||duration-time<8)delete playbackHistory[id];else playbackHistory[id]={time:Math.min(time,duration||time),duration,updatedAt:Date.now()};clearTimeout(playbackSaveTimer);playbackSaveTimer=setTimeout(flushPlaybackHistory,500);return true});
 ipcMain.handle('download:cancel',(_,id)=>{id=String(id||'');const queued=downloadQueue.findIndex(entry=>entry.task.id===id);if(queued>=0){const [entry]=downloadQueue.splice(queued,1);emitDownload({...entry.task,state:'cancelled',error:'已取消'});return true}const item=downloadItems.get(id);if(item)item.cancel();return !!item});
-ipcMain.handle('download:show',(_,filePath)=>{if(filePath&&fs.existsSync(filePath))shell.showItemInFolder(filePath);return true});
+ipcMain.handle('download:show',(_,id)=>{
+  const task=downloadHistory.find(item=>item.id===String(id||''));
+  if(!task?.path||task.state!=='completed'||!fs.existsSync(task.path))throw new Error('下载文件不存在或记录已失效');
+  shell.showItemInFolder(task.path);
+  return true;
+});
 ipcMain.handle('download:list',()=>downloadHistory);
 ipcMain.handle('download:remove',(_,id)=>{downloadHistory=downloadHistory.filter(item=>item.id!==id);saveDownloadHistory();return downloadHistory});
 ipcMain.handle('download:clear',()=>{downloadHistory=downloadHistory.filter(item=>['queued','progress'].includes(item.state));saveDownloadHistory();return downloadHistory});
@@ -717,6 +842,16 @@ ipcMain.handle('download:retry',async(_,id)=>{
   id=String(id||'');
   const existing=downloadHistory.find(item=>item.id===id);
   if(!existing)throw new Error('未找到该下载任务');
+  if(existing.refreshId){
+    try{
+      const refreshed=await resolveViewerMedia(existing.refreshId);
+      existing.url=refreshed.url;
+      existing.urlChain=[refreshed.url];
+      logger.info('download','Expired download URL refreshed',{id:existing.id,refreshId:existing.refreshId});
+    }catch(error){
+      logger.warn('download','Download URL refresh failed; using saved URL',{id:existing.id,refreshId:existing.refreshId,error:error?.message||String(error)});
+    }
+  }
   if(!existing.url||!/^https?:\/\//i.test(existing.url))throw new Error('下载地址缺失或无效，无法重试');
   if(!mainWindow||mainWindow.isDestroyed())throw new Error('主窗口不可用');
   const alreadyQueued=downloadQueue.some(entry=>entry.task.id===id);
@@ -762,12 +897,33 @@ ipcMain.handle('download:retry',async(_,id)=>{
   return task;
 });
 
+ipcMain.handle('external-search:search',async(_,rawKeyword)=>{
+  const keyword=String(rawKeyword||'').trim();if(keyword.length<2)throw new Error('请输入至少 2 个字符');if(keyword.length>100)throw new Error('搜索关键词不能超过 100 个字符');
+  const target=new URL('https://u9a9.org/');target.searchParams.set('type','2');target.searchParams.set('search',keyword);
+  const response=await net.fetch(target.toString(),{signal:AbortSignal.timeout(15000),headers:{accept:'text/html,application/xhtml+xml','user-agent':'Mozilla/5.0 PikPak-Desktop'}});if(!response.ok)throw new Error(`外部搜索暂时不可用（HTTP ${response.status}）`);
+  const length=Number(response.headers.get('content-length')||0);if(length>5*1024*1024)throw new Error('外部搜索响应过大');const html=await response.text();if(html.length>5*1024*1024)throw new Error('外部搜索响应过大');
+  const results=parseExternalSearchHtml(html).slice(0,200);logger.info('external-search','External search completed',{resultCount:results.length});return {results};
+});
+ipcMain.handle('external-search:copy',(_,value)=>{const magnet=findMagnetLink(value);if(!magnet)throw new Error('磁力链接无效');clipboard.writeText(magnet);return true});
+ipcMain.handle('external-search:add',async(_,value)=>{const magnet=findMagnetLink(value);if(!magnet)throw new Error('磁力链接无效');if(!readAccount().accessToken)throw new Error('请先连接 PikPak 账户');return driveMutation('/drive/v1/files',{body:buildOfflineTaskPayload(magnet,'')})});
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1380, height: 860, minWidth: 980, minHeight: 640, title:'PikPak Desktop',
-    backgroundColor:'#f4f6fa', icon:path.join(__dirname,'..','build','icon.png'), webPreferences:{ preload:path.join(__dirname,'preload.cjs'), contextIsolation:true, nodeIntegration:false }
+    backgroundColor:'#f4f6fa', icon:path.join(__dirname,'..','build','icon.png'), webPreferences:{ preload:path.join(__dirname,'preload.cjs'), contextIsolation:true, nodeIntegration:false, sandbox:true }
   });
   mainWindow=win;
+  win.webContents.setWindowOpenHandler(({url})=>{
+    if(/^https?:\/\//i.test(url))shell.openExternal(url).catch(error=>logger.warn('navigation','Failed to open external URL',error));
+    return {action:'deny'};
+  });
+  win.webContents.on('will-navigate',(event,url)=>{
+    if(url!==win.webContents.getURL()){
+      event.preventDefault();
+      logger.warn('navigation','Blocked renderer navigation',{url});
+    }
+  });
+  win.on('close',event=>{if(process.platform==='darwin'&&!isQuitting){event.preventDefault();win.hide()}});
   win.on('closed',()=>{if(mainWindow===win)mainWindow=null});
   if(process.env.PIKPAK_SMOKE_SCREENSHOT){
     win.webContents.once('did-finish-load',()=>setTimeout(async()=>{
@@ -788,16 +944,29 @@ function createWindow() {
       finally{if(process.env.PIKPAK_SMOKE_EXIT==='1')app.quit()}
     },1200));
   }
+  let showingFallbackError=false;
   win.webContents.on('did-fail-load',(_event,code,description,_url,isMainFrame)=>{
-    if(!isMainFrame)return;
-    const html=`<!doctype html><meta charset="utf-8"><title>PikPak Desktop</title><style>body{font-family:system-ui;background:#f4f6fa;color:#25304a;display:grid;place-items:center;height:100vh;margin:0}.box{background:white;padding:36px;border-radius:16px;box-shadow:0 12px 40px #27385d18;text-align:center}small{color:#8b94a5}</style><div class="box"><h2>客户端界面加载失败</h2><p>请重新启动应用；如果问题持续，请保留此错误码。</p><small>${code} · ${description}</small></div>`;
-    win.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent(html));
+    if(!isMainFrame||showingFallbackError)return;
+    showingFallbackError=true;
+    logger.error('renderer','Main interface failed to load',{code,description});
+    win.loadFile(path.join(__dirname,'error.html'),{query:{code:String(code)}}).catch(error=>logger.error('renderer','Fallback error page failed to load',error));
   });
   if (isDev) win.loadURL('http://127.0.0.1:5173');
   else win.loadFile(path.join(__dirname,'..','dist','index.html'));
 }
 
-app.whenReady().then(() => { logger.init(app.getPath('userData')); restoreDeviceId(); restoreTokenRefreshSchedule(); logger.info('app', 'Application ready', { version: app.getVersion() }); loadSettings();loadDownloadHistory();loadUploadHistory();loadPlaybackHistory();loadUploadResumes();installPikPakSessionCapture(); installDownloadManager(); createWindow(); app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); }); });
-app.on('before-quit',()=>{playingViewers.clear();updatePlaybackPowerBlocker();clearTimeout(downloadSaveTimer);clearTimeout(uploadSaveTimer);clearTimeout(playbackSaveTimer);clearTimeout(uploadResumesTimer);flushDownloadHistory();flushUploadHistory();flushPlaybackHistory();flushUploadResumes()});
+const hasSingleInstanceLock=app.requestSingleInstanceLock();
+if(!hasSingleInstanceLock){
+  app.quit();
+}else{
+  app.on('second-instance',()=>{
+    if(!mainWindow||mainWindow.isDestroyed())return;
+    if(mainWindow.isMinimized())mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    logger.info('app','Existing window focused after duplicate launch');
+  });
+  app.whenReady().then(() => { logger.init(app.getPath('userData')); restoreDeviceId(); restoreTokenRefreshSchedule(); logger.info('app', 'Application ready', { version: app.getVersion() }); loadSettings();loadDownloadHistory();loadUploadHistory();loadPlaybackHistory();loadUploadResumes();restrictLocalSessionPermissions(session.defaultSession);installPikPakSessionCapture();installDownloadManager();installApplicationMenu();startClipboardMagnetMonitor();createWindow();app.on('activate',()=>{if(!mainWindow||mainWindow.isDestroyed())createWindow();else{mainWindow.show();mainWindow.focus()}}); });
+}
+app.on('before-quit',()=>{isQuitting=true;playingViewers.clear();updatePlaybackPowerBlocker();clearTimeout(downloadSaveTimer);clearTimeout(uploadSaveTimer);clearTimeout(playbackSaveTimer);clearTimeout(uploadResumesTimer);if(clipboardTimer){clearInterval(clipboardTimer);clipboardTimer=null}flushDownloadHistory();flushUploadHistory();flushPlaybackHistory();flushUploadResumes()});
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-

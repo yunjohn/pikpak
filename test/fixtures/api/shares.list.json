@@ -1,0 +1,26 @@
+{
+  "shares": [
+    {
+      "share_id": "s-2001",
+      "title": "分享的视频",
+      "share_url": "https://example.invalid/s/ABCdefGHijkl",
+      "pass_code": "1234",
+      "create_time": "2024-01-02T03:04:05+08:00",
+      "file_size": "1024",
+      "view_count": "3",
+      "restore_count": "1",
+      "share_status": "OK",
+      "share_status_text": "正常"
+    },
+    {
+      "share_id": "s-2002",
+      "title": "分享文档",
+      "share_url": "https://example.invalid/s/QWErtyuio",
+      "pass_code": "6789",
+      "create_time": "2024-02-03T04:05:06+08:00",
+      "file_size": "2048",
+      "view_count": "0",
+      "restore_count": "0"
+    }
+  ]
+}

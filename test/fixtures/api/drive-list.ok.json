@@ -1,0 +1,46 @@
+{
+  "files": [
+    {
+      "id": "fd-dir-1001",
+      "kind": "drive#folder",
+      "name": "Pack From Shared",
+      "parent_id": "",
+      "size": "0",
+      "modified_time": "2024-12-29T16:34:00+08:00",
+      "created_time": "2024-12-29T16:30:00+08:00",
+      "trashed": false
+    },
+    {
+      "id": "fd-video-1002",
+      "kind": "drive#file",
+      "name": "演示视频.mp4",
+      "parent_id": "",
+      "size": "128849018",
+      "modified_time": "2023-08-16T02:06:00+08:00",
+      "mime_type": "video/mp4",
+      "thumbnail_link": "https://example.invalid/thumb/fd-video-1002.png",
+      "web_content_link": "https://example.invalid/media/fd-video-1002/web.mp4",
+      "medias": [
+        {
+          "link": { "url": "https://example.invalid/media/fd-video-1002/original.mp4" },
+          "is_origin": true,
+          "resolution_name": "原画",
+          "video_type": "MPEG4",
+          "video_stream_id": "video-1080"
+        }
+      ],
+      "starred": true,
+      "tags": [{ "name": "STAR" }]
+    },
+    {
+      "id": "fd-note-1003",
+      "kind": "drive#file",
+      "name": "notes.txt",
+      "parent_id": "",
+      "size": "4096",
+      "modified_time": "2023-05-06T10:45:00+08:00",
+      "mime_type": "text/plain"
+    }
+  ],
+  "next_page_token": "page-token-abc-123"
+}

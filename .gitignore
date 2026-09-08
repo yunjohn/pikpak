@@ -3,11 +3,12 @@ dist/
 release/
 release-*/
 
-# Local handoff and diagnostic artifacts
-开发交接文档.md
+# Local diagnostic artifacts
 pik.js
 *.log
 *.png.error.txt
+.workbuddy/
+/main.cjs
 
 # Editor and operating-system files
 .idea/

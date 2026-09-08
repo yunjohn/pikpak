@@ -18,6 +18,14 @@ npm run package:win
 
 产物位于 `release/PikPak-Desktop-<版本>-portable.exe`。
 
+生成 macOS Apple Silicon 安装包与 ZIP：
+
+```bash
+npm run package:mac
+```
+
+产物位于 `release/PikPak-Desktop-<版本>-mac-arm64.dmg` 和对应 ZIP。未配置 Apple Developer ID 时产物不会签名或公证。
+
 ## 当前能力
 
 - Windows 桌面文件管理界面
@@ -46,7 +54,7 @@ npm run package:win
 - 主进程统一处理 PikPak API 和 captcha 签名
 - 离线下载创建时选择网盘保存目录
 - 创建分享时选择有效期以及公开或提取码访问
-- 单项操作位于对应文件行，多选操作条位于文件列表内部，不占用页面顶部工具栏
+- 单项操作通过右键菜单与底部多选操作浮层完成，不占用页面顶部工具栏；支持 Command/Ctrl 点选、Shift 范围选与鼠标框选
 
 ## 当前限制
 

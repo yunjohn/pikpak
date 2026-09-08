@@ -1,6 +1,6 @@
 {
   "name": "pikpak-desktop-client",
-  "version": "0.53.7",
+  "version": "0.55.14",
   "description": "Independent PikPak desktop file browser and media client",
   "author": "PikPak Desktop contributors",
   "private": true,
@@ -10,6 +10,7 @@
     "dev": "concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "build": "node scripts/verify-ipc.mjs && node scripts/prepare-viewer.mjs && vite build && node scripts/verify-dist.mjs",
     "package:win": "npm run build && electron-builder --win portable",
+    "package:mac": "npm run build && electron-builder --mac dmg zip --config.electronDist=node_modules/electron/dist",
     "stage:asar": "node scripts/stage-asar.cjs",
     "smoke": "node scripts/smoke.cjs",
     "preview": "vite preview",
@@ -48,6 +49,15 @@
         "portable"
       ],
       "artifactName": "PikPak-Desktop-${version}-portable.${ext}"
+    },
+    "mac": {
+      "icon": "build/icon.png",
+      "category": "public.app-category.utilities",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "artifactName": "PikPak-Desktop-${version}-mac-${arch}.${ext}"
     }
   }
 }

@@ -1,0 +1,15 @@
+{
+  "data": {
+    "files": [
+      {
+        "id": "fd-drift-1",
+        "kind": "drive#file",
+        "name": "drift.txt",
+        "parent_id": "",
+        "size": "128",
+        "modified_time": "2022-01-01T00:00:00+08:00"
+      }
+    ],
+    "next_page_token": "drift-token-0"
+  }
+}

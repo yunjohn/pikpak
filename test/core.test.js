@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
-const { CLIENT_ID, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, matchSubtitles, detectConflicts, generateUniqueName, isValidDeviceId, accountForStorage, extractCredentialsFromStorage, buildTokenRefreshBody, jwtExpiryMs, decodeSubtitleBytes, playbackSourcesFromFile } = require('../electron/core.cjs');
+const { CLIENT_ID, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, normalizeQuota, recentFilesFromEvents, normalizeIds, normalizeRemoteName, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, matchSubtitles, detectConflicts, generateUniqueName, isValidDeviceId, accountForStorage, extractCredentialsFromStorage, buildTokenRefreshBody, normalizeAccessToken, jwtExpiryMs, tokenRefreshDelayMs, apiErrorMessage, decodeSubtitleBytes, playbackSourcesFromFile } = require('../electron/core.cjs');
 
 describe('desktop core', () => {
   it('normalizes refreshed playback sources and removes duplicate URLs', () => {
@@ -39,12 +39,32 @@ describe('desktop core', () => {
     expect(buildTokenRefreshBody({refreshToken:'refresh-token',clientId:' custom-client '})).toMatchObject({client_id:'custom-client'});
     expect(()=>buildTokenRefreshBody({})).toThrow(/refresh_token/);
   });
+  it('normalizes only plausible manual access tokens',()=>{
+    expect(normalizeAccessToken(' Bearer access-token-value-1234567890 ')).toBe('access-token-value-1234567890');
+    expect(()=>normalizeAccessToken('short')).toThrow('格式无效');
+    expect(()=>normalizeAccessToken(`token ${'x'.repeat(30)}`)).toThrow('格式无效');
+  });
 
   it('reads expiry from a JWT access token without accepting malformed values', () => {
     const payload=Buffer.from(JSON.stringify({exp:1893456000})).toString('base64url');
     expect(jwtExpiryMs(`header.${payload}.signature`)).toBe(1893456000000);
     expect(jwtExpiryMs('opaque-token')).toBe(0);
     expect(jwtExpiryMs('a.invalid-json.c')).toBe(0);
+  });
+
+  it('schedules refresh five minutes early and immediately for expired tokens', () => {
+    const now = 1_800_000_000_000;
+    expect(tokenRefreshDelayMs(now + 60 * 60 * 1000, now)).toBe(55 * 60 * 1000);
+    expect(tokenRefreshDelayMs(now + 4 * 60 * 1000, now)).toBe(0);
+    expect(tokenRefreshDelayMs(now - 1, now)).toBe(0);
+    expect(tokenRefreshDelayMs(0, now)).toBeNull();
+  });
+
+  it('turns transport and service failures into retryable user messages',()=>{
+    expect(apiErrorMessage(0)).toBe('网络连接失败，请检查网络后重试');
+    expect(apiErrorMessage(429,{error:'rate limited'})).toBe('请求过于频繁，请稍后重试');
+    expect(apiErrorMessage(503,{error:'upstream detail'})).toBe('PikPak 服务暂时不可用，请稍后重试');
+    expect(apiErrorMessage(400,{error_description:'请求参数无效'})).toBe('请求参数无效');
   });
 
   it('detects name conflicts case-insensitively and separates non-conflicts', () => {
@@ -62,6 +82,13 @@ describe('desktop core', () => {
     expect(conflicts.map(c => c.source.name)).toEqual(['File.txt', 'Folder']);
     expect(conflicts.map(c => c.existing.id)).toEqual(['t1', 't3']);
     expect(nonConflicts.map(n => n.name)).toEqual(['unique.mp4']);
+  });
+  it('validates remote file and folder names',()=>{
+    expect(normalizeRemoteName('  合法名称.txt  ')).toBe('合法名称.txt');
+    expect(()=>normalizeRemoteName('')).toThrow('名称不能为空');
+    expect(()=>normalizeRemoteName('../escape')).toThrow('路径分隔符');
+    expect(()=>normalizeRemoteName('bad\\name')).toThrow('路径分隔符');
+    expect(()=>normalizeRemoteName('x'.repeat(256))).toThrow('255');
   });
 
   it('generates unique copy names avoiding existing collisions', () => {
