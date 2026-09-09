@@ -16,7 +16,7 @@ npm run dev
 npm run package:win
 ```
 
-产物位于 `release/PikPak-Desktop-<版本>-portable.exe`。
+产物位于 `release-<版本>-win/PikPak-Desktop-<版本>-portable.exe`。
 
 生成 macOS Apple Silicon 安装包与 ZIP：
 

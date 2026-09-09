@@ -68,6 +68,16 @@ describe('image viewer',()=>{
     expect(dom.window.document.querySelector('.image-zoom-badge').textContent).toBe('120%');
     imageShell.dispatchEvent(new dom.window.WheelEvent('wheel',{deltaX:2,deltaY:40,cancelable:true}));
     expect(dom.window.document.querySelector('.image-zoom-badge').textContent).toBe('120%');
+    await new Promise(resolve=>setTimeout(resolve,70));
+    const wheelUp=new dom.window.WheelEvent('wheel',{deltaY:-3,deltaMode:dom.window.WheelEvent.DOM_DELTA_LINE,cancelable:true});
+    imageShell.dispatchEvent(wheelUp);
+    expect(wheelUp.defaultPrevented).toBe(true);
+    expect(dom.window.document.querySelector('img').src).toBe('https://example.test/two.jpg');
+    imageShell.dispatchEvent(new dom.window.WheelEvent('wheel',{deltaY:-3,deltaMode:dom.window.WheelEvent.DOM_DELTA_LINE,cancelable:true}));
+    expect(dom.window.document.querySelector('img').src).toBe('https://example.test/two.jpg');
+    await new Promise(resolve=>setTimeout(resolve,70));
+    imageShell.dispatchEvent(new dom.window.WheelEvent('wheel',{deltaY:100,cancelable:true}));
+    expect(dom.window.document.querySelector('img').src).toBe('https://example.test/three.jpg');
     dom.window.document.querySelector('[title^="开始幻灯片"]').click();
     expect(dom.window.document.querySelector('.image-tools').textContent).toContain('⏸');
     dom.window.close();

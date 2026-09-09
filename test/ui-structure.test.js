@@ -7,6 +7,9 @@ const mainSource=fs.readFileSync(path.resolve('electron/main.cjs'),'utf8');
 const preloadSource=fs.readFileSync(path.resolve('electron/preload.cjs'),'utf8');
 const indexSource=fs.readFileSync(path.resolve('index.html'),'utf8');
 const errorPageSource=fs.readFileSync(path.resolve('electron/error.html'),'utf8');
+const smokeSource=fs.readFileSync(path.resolve('scripts/smoke.cjs'),'utf8');
+const packageWinSource=fs.readFileSync(path.resolve('scripts/package-win.cjs'),'utf8');
+const packageJson=JSON.parse(fs.readFileSync(path.resolve('package.json'),'utf8'));
 
 describe('file manager layout',()=>{
   it('keeps file actions out of the top toolbar',()=>{
@@ -33,6 +36,26 @@ describe('file manager layout',()=>{
     expect(preloadSource).toContain("showDownload: id => ipcRenderer.invoke('download:show', id)");
     expect(appSource).toContain('api.showDownload(task.id)');
     expect(mainSource).toContain("task.state!=='completed'");
+  });
+
+  it('isolates smoke tests from the real user profile',()=>{
+    expect(smokeSource).toContain("fs.mkdtempSync(path.join(os.tmpdir(), 'pikpak-desktop-smoke-'))");
+    expect(smokeSource).toContain('PIKPAK_SMOKE_USER_DATA: smokeUserData');
+    expect(smokeSource).toContain('`release-${version}-win`');
+    expect(smokeSource).toContain('fs.rmSync(smokeUserData, { recursive: true, force: true })');
+    expect(mainSource).toContain("app.setPath('userData', path.resolve(process.env.PIKPAK_SMOKE_USER_DATA))");
+  });
+
+  it('reuses the installed Electron runtime for Windows when available',()=>{
+    expect(packageJson.scripts['package:win']).toContain('node scripts/package-win.cjs');
+    expect(packageWinSource).toContain('const outputDirectory = `release-${appVersion}-win`');
+    expect(packageWinSource).toContain('`--config.directories.output=${outputDirectory}`');
+    expect(packageWinSource).toContain("fs.existsSync(electronDist)");
+    expect(packageWinSource).toContain('`--config.electronDist=${electronDist}`');
+    expect(packageWinSource).toContain('function cachedElectronDirectory()');
+    expect(packageWinSource).toContain('`electron-v${electronVersion}-win32-${process.arch}.zip`');
+    expect(packageWinSource).toContain('`--config.electronDist=${cachedElectron}`');
+    expect(packageWinSource).toContain('downloading through electron-builder');
   });
 
   it('sandboxes the main renderer and blocks untrusted navigation',()=>{
@@ -120,11 +143,15 @@ describe('file manager layout',()=>{
     expect(appSource).not.toContain('v-html');
   });
 
-  it('caches completed searches briefly and invalidates them after mutations',()=>{
+  it('uses complete non-trashed directory listings and never caches false-negative empty searches',()=>{
     expect(mainSource).toContain('SEARCH_CACHE_TTL=2*60*1000');
     expect(mainSource).toContain('SEARCH_CACHE_LIMIT=10');
     expect(mainSource).toContain('return {...cached.result,cached:true}');
-    expect(mainSource).toContain('if(!truncated){searchCache.set(query');
+    expect(mainSource).toContain("with_audit:'true'");
+    expect(mainSource).toContain("phase:{eq:'PHASE_TYPE_COMPLETE'}");
+    expect(mainSource).toContain("trashed:{eq:false}");
+    expect(mainSource).toContain('if(!truncated&&matches.length){searchCache.set(query');
+    expect(mainSource).toContain('if(isDriveFolder(item)&&item.id&&!visited.has(item.id))');
     expect(mainSource).toContain('clearSearchCache();');
   });
 
@@ -201,13 +228,83 @@ describe('file manager layout',()=>{
     expect(styleSource).toMatch(/\.state\.error,\.transfer-empty\.error,\.archive-state\.error,\.offline-state\.error\{[^}]*color:/);
   });
 
+  it('refreshes the sidebar task count after adding an external result',()=>{
+    const start=appSource.indexOf('async function addExternal(result)');
+    const end=appSource.indexOf('function externalMagnetSummary',start);
+    const implementation=appSource.slice(start,end);
+    expect(implementation).toContain('await api.addExternalMagnet(result.magnet)');
+    expect(implementation).toContain('await refreshOfflineTasks()');
+    expect(implementation.indexOf('await refreshOfflineTasks()')).toBeGreaterThan(implementation.indexOf('await api.addExternalMagnet'));
+    expect(appSource).toContain('{{uploads.length+downloads.length+offlineTasks.length}}');
+  });
+
+  it('keeps search pages focused and uses a shared compact layout',()=>{
+    const styleSource=fs.readFileSync(path.resolve('src/style.css'),'utf8');
+    expect(appSource).toContain("mode.value==='external-search'?'外部搜索'");
+    const toolbar=appSource.slice(appSource.indexOf('<header class="toolbar">'),appSource.indexOf('</header>')+9);
+    expect(toolbar).not.toContain('@click="showShareStart"');
+    expect(appSource).toContain('<button :class="{active:mode===\'share\'}" @click="showShareStart"');
+    expect(appSource).toContain(`v-if="mode==='search'" class="toolbar-description"`);
+    expect(appSource).toContain(`v-else-if="mode==='external-search'" class="toolbar-description"`);
+    expect(appSource).toContain('class="search-page-intro"');
+    expect(appSource).toContain(':disabled="loading||globalQuery.trim().length<2"');
+    expect(appSource).toContain(':disabled="loading||externalQuery.trim().length<2"');
+    expect(styleSource).toMatch(/\.search-all-panel\{[^}]*width:min\(680px/);
+    expect(styleSource).toMatch(/\.external-search-head,\.external-results\{[^}]*width:min\(980px/);
+  });
+
+  it('offers recovery for expired sessions and failed file-list loads',()=>{
+    expect(mainSource).toContain("setAuthState('retryable-error','登录状态已过期，请重新连接 PikPak')");
+    expect(appSource).toContain('class="state state-retry error"');
+    expect(appSource).toContain('@click="refreshCurrent">重试</button>');
+  });
+
+  it('disables account-only library navigation until an account is connected',()=>{
+    const styleSource=fs.readFileSync(path.resolve('src/style.css'),'utf8');
+    for(const page of ['starred','recent','myshares','trash']){
+      expect(appSource).toContain(`:class="{active:mode==='${page}'}" :disabled="!account.connected"`);
+    }
+    expect(styleSource).toMatch(/\.sidebar nav button:disabled\{[^}]*cursor:not-allowed/);
+  });
+
+  it('keeps full search accessible and explains the login requirement',()=>{
+    expect(appSource).toContain(`:class="{active:mode==='search'}" title="全盘搜索" @click="showSearchPage"`);
+    expect(appSource).not.toContain(`:class="{active:mode==='search'}" :disabled="!account.connected"`);
+    expect(appSource).toContain("account.connected?'搜索整个 PikPak':'连接账户后使用全盘搜索'");
+    expect(appSource).toContain('class="primary search-login" :disabled="loading" @click="webLogin"');
+    expect(appSource).toContain("error.value='全盘搜索至少输入 2 个字符'");
+    expect(appSource).toContain("searchStats.value=null;error.value='';pathStack.value");
+  });
+
+  it('prevents duplicate refresh and login actions while work is pending',()=>{
+    const styleSource=fs.readFileSync(path.resolve('src/style.css'),'utf8');
+    expect(appSource).toContain('class="account-card" :disabled="loading"');
+    expect(appSource).toContain("{{loading?'正在处理…':account.connected?'账户已连接 · 退出':'网页登录 PikPak'}}");
+    expect(appSource.match(/class="soft" :disabled="loading" @click="(?:refreshCurrent|loadStarred|loadRecent|loadMyShares|loadTrash|refreshOfflineTasks)"/g)).toHaveLength(6);
+    expect(styleSource).toMatch(/\.primary:disabled,\.soft:disabled,\.account-card:disabled\{[^}]*cursor:not-allowed/);
+  });
+
+  it('shows the generic refresh action only on refreshable file pages',()=>{
+    expect(appSource).toContain(`v-if="(mode==='drive'&&account.connected)||(mode==='share'&&share)" class="soft" :disabled="loading" @click="refreshCurrent"`);
+    expect(appSource).not.toContain(`v-if="!['transfers','trash','starred','recent','myshares'].includes(mode)" class="soft"`);
+  });
+
+  it('keeps existing rows visible during refresh and shows compact feedback',()=>{
+    const styleSource=fs.readFileSync(path.resolve('src/style.css'),'utf8');
+    expect(appSource).toContain('v-if="loading&&!files.length" class="state"');
+    expect(appSource).toContain('v-if="loading&&files.length" class="list-feedback"');
+    expect(appSource).toContain('v-else-if="error&&files.length" class="list-feedback error"');
+    expect(styleSource).toMatch(/\.list-feedback\{[^}]*position:sticky/);
+    expect(styleSource).toContain('html[data-resolved-theme="dark"] .list-feedback');
+  });
+
   it('exposes file operations and asynchronous states to assistive technology',()=>{
     expect(appSource).toContain('aria-label="搜索当前目录"');
     expect(appSource).toContain('role="region" :aria-label="`${title}文件列表`"');
     expect(appSource).toContain(':aria-pressed="selectedIds.includes(item.id)');
     expect(appSource).toContain('role="toolbar" :aria-label="`已选择 ${selectedItems.length} 项的批量操作`"');
     expect(appSource).toContain('aria-label="下载所选项目"');
-    expect(appSource).toContain('class="state error" role="alert"');
+    expect(appSource).toContain('class="state state-retry error" role="alert"');
     expect(appSource).toContain('class="notice" role="status" aria-live="polite"');
   });
 

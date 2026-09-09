@@ -87,7 +87,7 @@ if(kind==='video'){
   if(subtitles.length&&subtitles[0]?.url){const subtitleFileId=currentFileId;fetch(subtitles[0].url).then(r=>r.ok?r.arrayBuffer():Promise.reject(new Error(`HTTP ${r.status}`))).then(bytes=>window.viewerPayload?.decodeSubtitle?window.viewerPayload.decodeSubtitle(bytes):new TextDecoder().decode(bytes)).then(text=>{if(currentFileId!==subtitleFileId)return;applySub(subtitles[0].name,text,0);subSelect.value='0'}).catch(()=>{})}
 }else if(kind==='image'){
   const gallery=items.length?items:[{id:fileId,name,url}],shell=document.createElement('section'),stage=document.createElement('div'),image=document.createElement('img'),previous=document.createElement('button'),next=document.createElement('button'),caption=document.createElement('div'),tools=document.createElement('div'),zoomBadge=document.createElement('span');
-  shell.className='image-shell';stage.className='image-stage';tools.className='image-tools';tools.setAttribute('role','toolbar');tools.setAttribute('aria-label','图片查看工具');zoomBadge.className='image-zoom-badge';zoomBadge.setAttribute('aria-live','polite');previous.className='image-nav previous';next.className='image-nav next';previous.textContent='‹';next.textContent='›';previous.title='上一张（←）';previous.setAttribute('aria-label','上一张');next.title='下一张（→）';next.setAttribute('aria-label','下一张');caption.className='image-caption';caption.setAttribute('aria-live','polite');
+  shell.className='image-shell';stage.className='image-stage';tools.className='image-tools';tools.setAttribute('role','toolbar');tools.setAttribute('aria-label','图片查看工具');zoomBadge.className='image-zoom-badge';zoomBadge.setAttribute('aria-live','polite');previous.className='image-nav previous';next.className='image-nav next';previous.textContent='‹';next.textContent='›';previous.title='上一张（← / 滚轮向上）';previous.setAttribute('aria-label','上一张');next.title='下一张（→ / 滚轮向下）';next.setAttribute('aria-label','下一张');caption.className='image-caption';caption.setAttribute('aria-live','polite');
   let index=Math.max(0,gallery.findIndex(item=>item.id===fileId||item.url===url)),scale=1,rotation=0,translateX=0,translateY=0,timer=null,isDragging=false,startX=0,startY=0,origX=0,origY=0;
   const imageCache=new Map();
   const preloadAround=center=>{
@@ -157,14 +157,25 @@ if(kind==='video'){
   });
   previous.addEventListener('click',()=>show(index-1));
   next.addEventListener('click',()=>show(index+1));
-  let gestureX=0,gestureTimer=null,gestureLocked=false;
+  let gestureX=0,wheelY=0,gestureTimer=null,gestureLocked=false;
   shell.addEventListener('wheel',event=>{
-    event.preventDefault();
-    if(event.ctrlKey){zoom(Math.max(-.5,Math.min(.5,-event.deltaY*.01)));return}
+    if(event.target?.closest?.('.image-tools'))return;
+    if(event.ctrlKey||event.metaKey){event.preventDefault();zoom(Math.max(-.5,Math.min(.5,-event.deltaY*.01)));return}
     if(Math.abs(event.deltaX)>6&&Math.abs(event.deltaX)>.7*Math.abs(event.deltaY)){
-      clearTimeout(gestureTimer);gestureTimer=setTimeout(()=>{gestureX=0;gestureLocked=false},60);if(gestureLocked)return;gestureX+=event.deltaX;
+      event.preventDefault();clearTimeout(gestureTimer);gestureTimer=setTimeout(()=>{gestureX=0;wheelY=0;gestureLocked=false},60);if(gestureLocked)return;gestureX+=event.deltaX;
       if(Math.abs(gestureX)>35){show(index+(gestureX>0?1:-1));gestureX=0;gestureLocked=true}
       return;
+    }
+    // Chromium does not expose the input device. Line/page deltas reliably
+    // identify a wheel, while a large, discrete vertical pixel delta with no
+    // horizontal component covers common Windows mouse-wheel events. Smooth
+    // pixel deltas remain untouched so ordinary trackpad scrolling does not
+    // zoom or flip images; trackpad pinch is handled by ctrlKey above.
+    const mouseWheel=event.deltaMode!==0||(Math.abs(event.deltaX)<.01&&Math.abs(event.deltaY)>=50&&Number.isInteger(event.deltaY));
+    if(mouseWheel&&event.deltaY){
+      event.preventDefault();clearTimeout(gestureTimer);gestureTimer=setTimeout(()=>{gestureX=0;wheelY=0;gestureLocked=false},60);if(gestureLocked)return;wheelY+=event.deltaY;
+      const threshold=event.deltaMode===0?40:1;
+      if(Math.abs(wheelY)>=threshold){show(index+(wheelY>0?1:-1));wheelY=0;gestureLocked=true}
     }
   },{passive:false});
   document.addEventListener('keydown',event=>{

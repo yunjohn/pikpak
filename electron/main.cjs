@@ -3,9 +3,16 @@ const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
-const { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, buildOfflineTaskAction, offlineTaskState, findMagnetLink, magnetIdentity, parseExternalSearchHtml, normalizeQuota, recentFilesFromEvents, normalizeIds, normalizeRemoteName, buildCreateSharePayload, normalizeShareList, previewKind, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, buildInterruptedDownloadOptions, normalizeDownloadRefreshId, verifiedDownloadState, isValidDeviceId, accountForStorage, extractCredentialsFromStorage, buildTokenRefreshBody, normalizeAccessToken, jwtExpiryMs, tokenRefreshDelayMs, apiErrorMessage, isFileNotFound, compareVersions, isUpdateAvailable, decodeSubtitleBytes, playbackSourcesFromFile } = require('./core.cjs');
+const { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, normalizeSearchText, searchNameMatches, isDriveFolder, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, buildOfflineTaskAction, offlineTaskState, findMagnetLink, magnetIdentity, parseExternalSearchHtml, normalizeQuota, recentFilesFromEvents, normalizeIds, normalizeRemoteName, buildCreateSharePayload, normalizeShareList, previewKind, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, buildInterruptedDownloadOptions, normalizeDownloadRefreshId, verifiedDownloadState, isValidDeviceId, accountForStorage, extractCredentialsFromStorage, buildTokenRefreshBody, normalizeAccessToken, jwtExpiryMs, tokenRefreshDelayMs, apiErrorMessage, isFileNotFound, compareVersions, isUpdateAvailable, decodeSubtitleBytes, playbackSourcesFromFile } = require('./core.cjs');
 const { ClipboardMagnetMonitor } = require('./clipboard-monitor.cjs');
 const { logger } = require('./logger.cjs');
+
+// Automated smoke runs must never reuse the daily profile. Besides making the
+// result nondeterministic, doing so can expose account state or file names in a
+// captured screenshot. This path is supplied only by scripts/smoke.cjs.
+if (process.env.PIKPAK_SMOKE_USER_DATA) {
+  app.setPath('userData', path.resolve(process.env.PIKPAK_SMOKE_USER_DATA));
+}
 
 function recordMainCrash(type, stack, reason) {
   try { logger.recordCrash({ type, reason: reason || '', stack: stack || '', appVersion: app.getVersion() }); } catch {}
@@ -231,7 +238,9 @@ async function apiRequest(url, { action, method='GET', body, authorization='', r
       if(readAccount().refreshToken)refreshed=await refreshAccessToken();
       if(!refreshed){logger.info('auth','Falling back to hidden-window refresh');refreshed=await refreshOfficialAuth()}
       if(refreshed){const next=readAccount().accessToken;return apiRequest(url,{action,method,body,authorization:next,retryAuth:false})}
-      clearAccount();if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('account:expired');
+      clearAccount();
+      setAuthState('retryable-error','登录状态已过期，请重新连接 PikPak');
+      if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('account:expired');
       logger.warn('auth', 'Auth refresh failed, session expired');
       throw new Error('登录状态已过期，请重新登录 PikPak');
     }
@@ -668,7 +677,7 @@ let activeSearchController = null;
 const searchCache=new Map(),SEARCH_CACHE_TTL=2*60*1000,SEARCH_CACHE_LIMIT=10;
 function clearSearchCache(){searchCache.clear()}
 ipcMain.handle('drive:search',async(_,rawQuery)=>{
-  const query=String(rawQuery||'').trim().toLocaleLowerCase();if(query.length<2)throw new Error('全盘搜索至少输入 2 个字符');const account=readAccount();if(!account.accessToken)throw new Error('请先连接 PikPak 账户');
+  const query=normalizeSearchText(rawQuery);if([...query].length<2)throw new Error('全盘搜索至少输入 2 个字符');const account=readAccount();if(!account.accessToken)throw new Error('请先连接 PikPak 账户');
   if(activeSearchController){activeSearchController.abort();activeSearchController=null}
   const cached=searchCache.get(query);
   if(cached&&Date.now()-cached.createdAt<SEARCH_CACHE_TTL){
@@ -686,18 +695,19 @@ ipcMain.handle('drive:search',async(_,rawQuery)=>{
       const results=await Promise.all(batch.map(async folder=>{
         if(controller.signal.aborted)throw new DOMException('Search aborted','AbortError');
         try{
-          const value=await listPages(pageToken=>{const params=new URLSearchParams({parent_id:folder.id,limit:'100',thumbnail_size:'SIZE_MEDIUM'});if(pageToken)params.set('page_token',pageToken);return `https://api-drive.mypikpak.com/drive/v1/files?${params}`},{action:'GET:/drive/v1/files',authorization:account.accessToken});return {folder,files:value.files};
+          const paramsBase={parent_id:folder.id,limit:'100',thumbnail_size:'SIZE_MEDIUM',with_audit:'true',filters:JSON.stringify({phase:{eq:'PHASE_TYPE_COMPLETE'},trashed:{eq:false}})};
+          const value=await listPages(pageToken=>{const params=new URLSearchParams(paramsBase);if(pageToken)params.set('page_token',pageToken);return `https://api-drive.mypikpak.com/drive/v1/files?${params}`},{action:'GET:/drive/v1/files',authorization:account.accessToken});return {folder,files:value.files};
         }catch(err){
           if(err&&(err.fileNotFound||isFileNotFound(err.status,err.data))){logger.debug('search','Skipped a folder that is no longer available',{folder_id:String(folder.id||'')});return {folder,files:[]}}
           throw err;
         }
       }));
-      for(const result of results){for(const item of result.files){scanned++;const names=[...result.folder.names,item.name||''];if(String(item.name||'').toLocaleLowerCase().includes(query))matches.push({...item,_search_path:names.join(' / '),_search_parent_id:result.folder.id});if(item.kind==='drive#folder'&&!visited.has(item.id))pending.push({id:item.id,names});if(scanned>=50000||matches.length>=500)break}}
+      for(const result of results){for(const item of result.files){scanned++;const names=[...result.folder.names,item.name||''];if(searchNameMatches(item.name,query))matches.push({...item,_search_path:names.join(' / '),_search_parent_id:result.folder.id});if(isDriveFolder(item)&&item.id&&!visited.has(item.id))pending.push({id:item.id,names});if(scanned>=50000||matches.length>=500)break}}
       if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('search:progress',{scanned,folders:visited.size,matchesCount:matches.length,isDone:false});
     }
     if(pending.length||visited.size>=5000||scanned>=50000||matches.length>=500)truncated=true;
     const result={files:matches,scanned,folders:visited.size,truncated};
-    if(!truncated){searchCache.set(query,{createdAt:Date.now(),result});while(searchCache.size>SEARCH_CACHE_LIMIT)searchCache.delete(searchCache.keys().next().value)}
+    if(!truncated&&matches.length){searchCache.set(query,{createdAt:Date.now(),result});while(searchCache.size>SEARCH_CACHE_LIMIT)searchCache.delete(searchCache.keys().next().value)}
     return result;
   }catch(err){
     if(err.name==='AbortError')return {files:matches,scanned,folders:visited.size,truncated:true,cancelled:true};

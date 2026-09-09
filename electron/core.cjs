@@ -23,6 +23,15 @@ function signCaptcha(deviceId, timestamp) {
 }
 function filesFrom(data) { return data.files || data.items || data.data?.files || []; }
 function nextPageToken(data) { return data.next_page_token || data.nextPageToken || data.data?.next_page_token || ''; }
+function normalizeSearchText(value) {
+  return String(value || '').normalize('NFKC').trim().toLocaleLowerCase();
+}
+function searchNameMatches(name, normalizedQuery) {
+  return normalizeSearchText(name).includes(normalizeSearchText(normalizedQuery));
+}
+function isDriveFolder(item = {}) {
+  return item.kind === 'drive#folder' || item.mime_type === 'application/x-directory';
+}
 function mergeShareFiles(apiFiles, scrapedFiles) {
   const scraped = new Map((scrapedFiles || []).map(item => [String(item.id), item]));
   const merged = (apiFiles || []).map(item => ({ ...scraped.get(String(item.id)), ...item, encodedToken:scraped.get(String(item.id))?.encodedToken || item.encodedToken || '' }));
@@ -443,4 +452,4 @@ function playbackSourcesFromFile(file = {}) {
   const seen=new Set();return values.filter(source=>/^https?:\/\//i.test(source.url)&&!seen.has(source.url)&&seen.add(source.url));
 }
 
-module.exports = { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, buildOfflineTaskAction, offlineTaskState, findMagnetLink, magnetIdentity, parseExternalSearchHtml, normalizeQuota, recentFilesFromEvents, normalizeIds, normalizeRemoteName, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, matchSubtitles, detectConflicts, generateUniqueName, buildInterruptedDownloadOptions, normalizeDownloadRefreshId, verifiedDownloadState, isValidDeviceId, accountForStorage, extractCredentialsFromStorage, buildTokenRefreshBody, normalizeAccessToken, jwtExpiryMs, tokenRefreshDelayMs, apiErrorMessage, isFileNotFound, compareVersions, isUpdateAvailable, decodeSubtitleBytes, playbackSourcesFromFile };
+module.exports = { CLIENT_ID, CLIENT_VERSION, PACKAGE_NAME, parseShareUrl, signCaptcha, filesFrom, nextPageToken, normalizeSearchText, searchNameMatches, isDriveFolder, mergeShareFiles, buildShareRestorePayload, buildOfflineTaskPayload, buildOfflineTaskAction, offlineTaskState, findMagnetLink, magnetIdentity, parseExternalSearchHtml, normalizeQuota, recentFilesFromEvents, normalizeIds, normalizeRemoteName, buildCreateSharePayload, normalizeShareList, previewKind, isArchiveFile, archiveItemsFrom, archiveAccessToken, sanitizeSubDir, matchSubtitles, detectConflicts, generateUniqueName, buildInterruptedDownloadOptions, normalizeDownloadRefreshId, verifiedDownloadState, isValidDeviceId, accountForStorage, extractCredentialsFromStorage, buildTokenRefreshBody, normalizeAccessToken, jwtExpiryMs, tokenRefreshDelayMs, apiErrorMessage, isFileNotFound, compareVersions, isUpdateAvailable, decodeSubtitleBytes, playbackSourcesFromFile };
